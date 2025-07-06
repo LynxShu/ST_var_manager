@@ -20,7 +20,7 @@
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
 
     // Use a global flag for the regex to find all commands in one go.
-    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET)\s*::\s*(?<params>[\s\\S]*?)>/g;
+    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET)\s*::\s*(?<params>[\s\S]*?)>/g;
     const INITIAL_STATE = { static: {}, volatile: [], responseSummary: [] };
 
     // --- Command Explanations ---
@@ -32,8 +32,6 @@
     // CANCEL_SET:   Cancels a scheduled TIMED_SET. <CANCEL_SET :: ...>
     // RESPONSE_SUMMARY: Adds a summary of the AI's response to a list. <RESPONSE_SUMMARY :: text>
 
-
-    var latest_gen_lvl = -1;
 
     // --- HELPER FUNCTIONS ---
     // TODO: refactor getchatmessages to JS-slash-runner version
@@ -89,7 +87,7 @@
     // --- CORE LOGIC ---
 
     async function processVolatileUpdates(state) {
-        if (!state.volatile?.length) return [];
+        if (!state.volatile.length) return [];
         const promotedCommands = [];
         const remainingVolatiles = [];
         const currentRound = await getRoundCounter();
@@ -111,7 +109,10 @@
     async function applyCommandsToState(commands, state) {
         const currentRound = await getRoundCounter();
         for (const command of commands) {
+            
+            //console.log(`[SAM] processing command: ${command.type}, ${command.params}`)
             const params = command.params.split('::').map(p => p.trim());
+            
 
             try {
                 switch (command.type) {
@@ -137,7 +138,10 @@
                     }
                     case 'RESPONSE_SUMMARY': {
                         if (!state.responseSummary) state.responseSummary = [];
+
+
                         state.responseSummary.push(command.params.trim());
+                        
                         break;
                     }
                     case 'TIMED_SET': {
@@ -238,9 +242,6 @@
     }
 
     // --- MAIN HANDLERS ---
-    // TODO: Refactor
-    // Logic incorrect. This only correlates to the LAST AI message.
-    // however, we get at index anyways
 
     async function processMessageState(index) {
         
@@ -277,6 +278,9 @@
         }
         const newCommands = results;
 
+        //console.log(newCommands.length);
+        
+
         state = await applyCommandsToState([...promotedCommands, ...newCommands], state);
 
         // finally, write the newest state/ replace the newest state into the current latest message.
@@ -287,6 +291,8 @@
 
         const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(state, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
         const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
+
+        //console.log(`[SAM] finalContent = ${finalContent}`);
 
         // setting current chat message.
         index = lastAIMessage.message_id;
@@ -344,13 +350,11 @@ $(async () => {
             }
             const lastIndex = (await getChatMessages("{{lastMessageId}}"))[0].message_id;
             
-            latest_gen_lvl = lastIndex;
 
             await loadStateFromMessage(lastAiIndex);
         }
 
         const update_events = [
-            tavern_events.GENERATION_STOPPED,
             tavern_events.GENERATION_ENDED
         ];
 
