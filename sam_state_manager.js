@@ -1,10 +1,11 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 1.7
+// == Version: 1.8
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
 // == functions, ensuring proper variable display and structure.
+// == It now includes proper event listener cleanup on unload.
 // ============================================================================
 
 (function () {
@@ -35,15 +36,9 @@
 
 
     // --- HELPER FUNCTIONS ---
-    // I completely did it wrong. JS-slash-runner sucks in its own right. It should have the functionality of disabling all printouts.
-    
-
     async function getRoundCounter(){
-
         return SillyTavern.chat.length -1;
     }
-
-
 
     function parseStateFromMessage(messageContent) {
         if (!messageContent) return null;
@@ -61,11 +56,7 @@
 
     async function findLatestState(chatHistory) {
         for (let i = chatHistory.length - 1; i >= 0; i--) {
-
-            //console.log(`[SAM] [findLatestState] scanning message ${i}`);
-
             const message = chatHistory[i];
-            //if (message.role === "user") continue;
             if (message.is_user) continue;
 
             const swipeContent = message.mes;
@@ -80,8 +71,6 @@
     }
     
     function goodCopy(state) {
-        // Start with a clone of the NESTED static data.
-        // Return the object with its nested structure intact.
         return _.cloneDeep(state) ?? {INITIAL_STATE};
     }
 
@@ -107,15 +96,11 @@
         return promotedCommands;
     }
 
-
     async function applyCommandsToState(commands, state) {
         const currentRound = await getRoundCounter();
         for (const command of commands) {
-            
-            //console.log(`[SAM] processing command: ${command.type}, ${command.params}`)
             const params = command.params.split('::').map(p => p.trim());
             
-
             try {
                 switch (command.type) {
                     case 'SET': {
@@ -140,12 +125,9 @@
                     }
                     case 'RESPONSE_SUMMARY': {
                         if (!state.responseSummary) state.responseSummary = [];
-
                         if (!state.responseSummary.includes(command.params.trim())){
                            state.responseSummary.push(command.params.trim());
                         }
-
-                        
                         break;
                     }
                     case 'TIMED_SET': {
@@ -164,77 +146,38 @@
                         const index = parseInt(identifier, 10);
                         if (!isNaN(index) && index >= 0 && index < state.volatile.length) {
                             state.volatile.splice(index, 1);
-                            console.log(`[${SCRIPT_NAME}] Canceled timed set at index ${index}.`);
                         } else {
                             state.volatile = state.volatile.filter(entry => {
                                 const [varName, , , , reason] = entry;
                                 return varName !== identifier && reason !== identifier;
                             });
-                            if (state.volatile.length < originalCount) {
-                                console.log(`[${SCRIPT_NAME}] Canceled timed set(s) matching identifier "${identifier}".`);
-                            }
                         }
                         break;
                     }
-
-                    // NEW: Deletes an item from a list at a specific index.
                     case 'DEL': {
                         const [listPath, indexStr] = params;
-                        if (!listPath || indexStr === undefined) {
-                            console.warn(`[${SCRIPT_NAME}] DEL command malformed. Params:`, params);
-                            continue;
-                        }
+                        if (!listPath || indexStr === undefined) continue;
                         const index = parseInt(indexStr, 10);
-                        if (isNaN(index)) {
-                            console.warn(`[${SCRIPT_NAME}] DEL command received non-numeric index: "${indexStr}"`);
-                            continue;
-                        }
+                        if (isNaN(index)) continue;
                         const list = _.get(state.static, listPath);
-                        if (!Array.isArray(list)) {
-                            console.warn(`[${SCRIPT_NAME}] DEL: Target "${listPath}" is not an array.`);
-                            continue;
-                        }
+                        if (!Array.isArray(list)) continue;
                         if (index >= 0 && index < list.length) {
-                            list.splice(index, 1); // Modifies the array in place
-                            console.log(`[${SCRIPT_NAME}] DEL: Removed item at index ${index} from list "${listPath}".`);
-                        } else {
-                            console.warn(`[${SCRIPT_NAME}] DEL: Index ${index} is out of bounds for list "${listPath}" (length: ${list.length}).`);
+                            list.splice(index, 1);
                         }
                         break;
                     }
-
-                    // NEW: Removes an item from a list of objects based on a property's value.
                     case 'REMOVE': {
                         const [listPath, identifier, targetId] = params;
-                        if (!listPath || !identifier || targetId === undefined) {
-                            console.warn(`[${SCRIPT_NAME}] REMOVE command malformed. Params:`, params);
-                            continue;
-                        }
+                        if (!listPath || !identifier || targetId === undefined) continue;
                         const list = _.get(state.static, listPath);
-                        if (!Array.isArray(list)) {
-                            console.warn(`[${SCRIPT_NAME}] REMOVE: Target "${listPath}" is not an array.`);
-                            continue;
-                        }
-
-                        const originalLength = list.length;
-                        // Filter the list, keeping only items that DON'T match the criteria.
+                        if (!Array.isArray(list)) continue;
                         const newList = list.filter(item => {
-                            // Keep items that are not objects or don't have the property.
                             if (typeof item !== 'object' || item === null || !item.hasOwnProperty(identifier)) {
                                 return true;
                             }
-                            // Remove the item if its property value MATCHES the targetId (using non-strict comparison).
-                            // So, we KEEP it if it DOES NOT match.
                             return item[identifier] != targetId;
                         });
-
-                        if (newList.length < originalLength) {
-                            // Use _.set because filter() creates a new array, which must be set back into the state.
-                            _.set(state.static, listPath, newList);
-                            console.log(`[${SCRIPT_NAME}] REMOVE: Removed ${originalLength - newList.length} item(s) from "${listPath}" where "${identifier}" matched "${targetId}".`);
-                        } else {
-                            console.log(`[${SCRIPT_NAME}] REMOVE: No item found in "${listPath}" where "${identifier}" matched "${targetId}".`);
-                        }
+                        _.set(state.static, listPath, newList);
                         break;
                     }
                 }
@@ -246,213 +189,175 @@
     }
 
     // --- MAIN HANDLERS ---
-
     async function processMessageState(index) {
-
-        if (isProcessingState){
-            console.log("[SAM] already processing message state, aborting");
-            return;
-        }
+        if (isProcessingState) return;
         isProcessingState = true;
-
         
-        // -> we must have that message at index exists. Therefore we do not need to search it down
-        // getChatMessages returns an ERROR. we must try-catch it.
-
-        if (index === "{{lastMessageId}}"){
-            index = SillyTavern.chat.length;
+        try {
+            if (index === "{{lastMessageId}}"){
+                index = SillyTavern.chat.length - 1;
+            }
+            const lastAIMessage = SillyTavern.chat[index];
+            if (!lastAIMessage || lastAIMessage.is_user) return;
+            
+            const state = await getVariables();
+            const promotedCommands = await processVolatileUpdates(state);
+            const messageContent = lastAIMessage.mes;
+            
+            let match;
+            const newCommands = [];
+            while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
+                newCommands.push({type: match.groups.type, params: match.groups.params});
+            }
+            
+            const newState = await applyCommandsToState([...promotedCommands, ...newCommands], state);
+            
+            await replaceVariables(goodCopy(newState));
+            
+            const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
+            const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
+            const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
+            
+            await setChatMessage({message: finalContent}, index);
+        } catch (error) {
+            console.error(`[${SCRIPT_NAME}] Error in processMessageState for index ${index}:`, error);
+        } finally {
+            isProcessingState = false;
         }
-
-        var lastAIMessage = null;
-        try{
-            // not using getMessages anymore. getMessages sucks ass.
-            lastAIMessage = SillyTavern.chat[index];
-        }catch(e){
-            console.log(`[SAM] processMessageState: Invalid index ${index}`);
-            return;
-        }
-
-        // exc handling: if last message does not have content / role === "user" then return         
-        if (!lastAIMessage || lastAIMessage.is_user) return;
-
-        // get latest tavern variable JSON
-
-
-        var state = await getVariables();
-
-        // handle all commands scheduled to execute at T = current
-        // promote all promote-able commands
-        const promotedCommands = await processVolatileUpdates(state);
-        
-        // now using official ST docs. Extract mes from it first and the rest is plug
-        var messageContent = lastAIMessage.mes;
-
-        let match;
-        const results = [];
-
-        // .exec() finds the next match in the string
-        while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
-        const desiredResult = {type: match.groups.type, params: match.groups.params};
-        results.push(desiredResult);
-        }
-        const newCommands = results;
-
-        //console.log(newCommands.length);
-        
-
-        state = await applyCommandsToState([...promotedCommands, ...newCommands], state);
-
-        // finally, write the newest state/ replace the newest state into the current latest message.
-        console.log("[SAM] Replacing variables in Process Message State");
-
-
-        await replaceVariables(goodCopy(state));
-
-        const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
-
-        const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(state, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
-        const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
-
-        //console.log(`[SAM] finalContent = ${finalContent}`);
-
-        // setting current chat message.
-        await setChatMessage({message: finalContent}, index);
-
-        isProcessingState = false;
-
     }
 
     async function loadStateFromMessage(index) {
-        if (index === "{{lastMessageId}}"){
-            index = SillyTavern.chat.length -1;
+        if (index === "{{lastMessageId}}") {
+            index = SillyTavern.chat.length - 1;
         }
 
-        var message = ""
         try {
-            var message = SillyTavern.chat[index];
-        } catch (e) {
-            console.log(`[SAM] Load state from message: Failed to get at index= ${index}, likely the index does not exist. SAM will keep old state. Error message: ${e}`);
-            return;
-        }
+            const message = SillyTavern.chat[index];
+            if (!message) return;
 
-        const messageContent = message.mes;
-
-        const state = parseStateFromMessage(messageContent);
-        if (state) {
-            console.log("[SAM] Replacing variables in LoadStateFromMessage");
+            const messageContent = message.mes;
+            const state = parseStateFromMessage(messageContent);
             
-
-            await replaceVariables(goodCopy(state));
-
-        } else {
-            //const chatHistory = await getChatMessages(`0-${index}`);
-            const chatHistory = SillyTavern.chat;
-            const lastKnownState = await findLatestState(chatHistory);
-
-            console.log("[SAM] Replacing variables in LoadStateFromMessage and cannot find latest state")
-
-
-            await replaceVariables(goodCopy(lastKnownState));
+            if (state) {
+                await replaceVariables(goodCopy(state));
+            } else {
+                const chatHistory = SillyTavern.chat;
+                const lastKnownState = await findLatestState(chatHistory);
+                await replaceVariables(goodCopy(lastKnownState));
+            }
+        } catch (e) {
+            console.log(`[${SCRIPT_NAME}] Load state from message failed for index ${index}:`, e);
         }
     }
     
     async function findLastAiMessageAndIndex(beforeIndex) {
         const chat = SillyTavern.chat;
-
-        if (beforeIndex === -1){
+        if (beforeIndex === -1) {
             beforeIndex = chat.length;
         }
-
         for (let i = beforeIndex - 1; i >= 0; i--) {
             if (chat[i].is_user === false) return i;
         }
         return -1;
     }
 
-    // --- EVENT LISTENER REGISTRATION ---
-$(() => {
-    try {
-        console.log(`[${SCRIPT_NAME}] State management loading. GLHF, player.`);
+    // --- EVENT HANDLER DEFINITIONS ---
+    // We define handlers here so we have a stable reference for adding and removing them.
+    const eventHandlers = {
+        // Handles new message generation.
+        handleGenerationEnded: async () => {
+            console.log(`[${SCRIPT_NAME}] Generation ended, processing state.`);
+            try {
+                const index = SillyTavern.chat.length - 1;
+                await processMessageState(index);
+            } catch (error) {
+                console.error(`[${SCRIPT_NAME}] Error in GENERATION_ENDED handler:`, error);
+            }
+        },
 
-        async function initializeOrReloadStateForCurrentChat() {
-            console.log(`[${SCRIPT_NAME}] Loading state for current chat.`);
+        // Handles swiping to a different AI response.
+        handleMessageSwiped: async () => {
+            console.log(`[${SCRIPT_NAME}] Message swiped, reloading state.`);
+            try {
+                const lastAIMessageIndex = await findLastAiMessageAndIndex(-1);
+                if (lastAIMessageIndex !== -1) {
+                    await loadStateFromMessage(lastAIMessageIndex);
+                }
+            } catch (error) {
+                console.error(`[${SCRIPT_NAME}] Error in MESSAGE_SWIPED handler:`, error);
+            }
+        },
+
+        // Handles editing a message.
+        handleMessageEdited: async () => {
+            console.log(`[${SCRIPT_NAME}] Message edited, reloading state.`);
+            try {
+                const lastMessage = SillyTavern.chat[SillyTavern.chat.length - 1];
+                if (lastMessage && !lastMessage.is_user) {
+                    const lastAiIndex = await findLastAiMessageAndIndex(-1);
+                    await loadStateFromMessage(lastAiIndex);
+                }
+            } catch (error) {
+                console.error(`[${SCRIPT_NAME}] Error in MESSAGE_EDITED handler:`, error);
+            }
+        },
+
+        // Handles loading a new chat.
+        handleChatChanged: async () => {
+            console.log(`[${SCRIPT_NAME}] Chat changed, initializing state.`);
+            try {
+                await eventHandlers.initializeOrReloadStateForCurrentChat();
+            } catch (error) {
+                console.error(`[${SCRIPT_NAME}] Error in CHAT_CHANGED handler:`, error);
+            }
+        },
+
+        // Initializer function, also used by CHAT_CHANGED.
+        initializeOrReloadStateForCurrentChat: async () => {
             const lastAiIndex = await findLastAiMessageAndIndex(-1);
             if (lastAiIndex === -1) {
                 console.log(`[${SCRIPT_NAME}] No AI messages found. Initializing with default state.`);
-
-
                 await replaceVariables(_.cloneDeep(INITIAL_STATE));
-
-                return;
+            } else {
+                await loadStateFromMessage(lastAiIndex);
             }
-
-            await loadStateFromMessage(lastAiIndex);
         }
+    };
+    
+    // --- SCRIPT LIFECYCLE (SETUP & TEARDOWN) ---
+    $(() => {
+        // SETUP: This runs when the script is loaded.
+        try {
+            console.log(`[${SCRIPT_NAME}] State management loading. GLHF, player.`);
 
-        const update_events = [
-            tavern_events.GENERATION_ENDED
-        ];
-        update_events.forEach(eventName => {
-            eventOn(eventName, async () => {
-                console.log(`[${SCRIPT_NAME}] detected new message`);
-                try {
-                    const index = SillyTavern.chat.length - 1;
-                    await processMessageState(index);
-                } catch (error) { console.error(`[${SCRIPT_NAME}] Error in MESSAGE_RECEIVED handler:`, error); }
+            // Register all event listeners
+            const update_events = [tavern_events.GENERATION_ENDED];
+            update_events.forEach(eventName => {
+                eventOn(eventName, eventHandlers.handleGenerationEnded);
             });
-        })
+            eventOn(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
+            eventOn(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
+            eventOn(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
 
-        eventOn(tavern_events.MESSAGE_SWIPED, (message) => {
-            console.log(`[${SCRIPT_NAME}] detected swipe`);
-            setTimeout(async () => {
-                try {
-                    const index = SillyTavern.chat.length - 1;
-                    if (index !== -1) {
-                        const lastAIMessageIndex = await findLastAiMessageAndIndex(-1);
-                        await loadStateFromMessage(lastAIMessageIndex);
-                    }
-                } catch (error) {
-                    console.error(`[${SCRIPT_NAME}] Error in deferred MESSAGE_SWIPED handler:`, error);
-                }
-            }, 0);
+            // Initial load for the very first time the script runs.
+            eventHandlers.initializeOrReloadStateForCurrentChat();
+
+        } catch (error) {
+            console.error(`[${SCRIPT_NAME}] Error during initialization:`, error);
+        }
+    });
+
+    $(window).on('unload', () => {
+        // TEARDOWN: This runs when the script is about to be unloaded (e.g., page navigation, extension reload).
+        console.log(`[${SCRIPT_NAME}] Unloading and removing event listeners.`);
+        
+        const update_events = [tavern_events.GENERATION_ENDED];
+        update_events.forEach(eventName => {
+            eventRemoveListener(eventName, eventHandlers.handleGenerationEnded);
         });
+        eventRemoveListener(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
+        eventRemoveListener(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
+        eventRemoveListener(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
+    });
 
-        eventOn(tavern_events.MESSAGE_EDITED, async () => {
-            console.log(`[${SCRIPT_NAME}] detected edit`);
-            var message;
-            try{
-                message = SillyTavern.chat[SillyTavern.chat.length-1];
-                if (message === undefined) return;
-            } catch (e){
-                return;
-            }
-
-            try {
-                if (message.role !== "user") {
-                    // if it is an AI message, reload its state. This allows manual editing of the state block.
-                    const lastAiIndex = await findLastAiMessageAndIndex(-1);
-                    await loadStateFromMessage(lastAiIndex);
-                    return;
-                }
-            } catch (error) { 
-                console.error(`[${SCRIPT_NAME}] Error in MESSAGE_EDITED handler:`, error); 
-            }
-        });
-
-        eventOn(tavern_events.CHAT_CHANGED, async () => {
-            console.log(`[${SCRIPT_NAME}] detected new chat context load.`);
-            try {
-                await initializeOrReloadStateForCurrentChat();
-            } catch(error) {
-                console.error(`[${SCRIPT_NAME}] Error in CHAT_CHANGED handler:`, error);
-            }
-        });
-
-        // Initial load for the very first time the script runs.
-        initializeOrReloadStateForCurrentChat();
-
-    } catch (error) {
-         console.error(`[${SCRIPT_NAME}] Error during initialization:`, error);
-    }
-});
 })();
