@@ -22,6 +22,7 @@
     // Use a global flag for the regex to find all commands in one go.
     const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET)\s*::\s*(?<params>[\s\S]*?)>/g;
     const INITIAL_STATE = { static: {}, volatile: [], responseSummary: [] };
+    let isProcessingState = false;
 
     // --- Command Explanations ---
     // SET:          Sets a variable to a value. <SET :: path.to.var :: value>
@@ -34,13 +35,12 @@
 
 
     // --- HELPER FUNCTIONS ---
-    // TODO: refactor getchatmessages to JS-slash-runner version
-    // TODO: refactor updates
+    // I completely did it wrong. JS-slash-runner sucks in its own right. It should have the functionality of disabling all printouts.
     
 
     async function getRoundCounter(){
 
-        return await getChatMessages("{{lastMessageId}}").message_id;
+        return SillyTavern.chat.length -1;
     }
 
 
@@ -53,10 +53,10 @@
                 return JSON.parse(match[1].trim());
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Failed to parse state JSON.`, error);
-                return null;
+                return {};
             }
         }
-        return null;
+        return {};
     }
 
     async function findLatestState(chatHistory) {
@@ -65,8 +65,10 @@
             //console.log(`[SAM] [findLatestState] scanning message ${i}`);
 
             const message = chatHistory[i];
-            if (message.role === "user") continue;
-            const swipeContent = message.swipes?.[message.swipe_id ?? 0] ?? message.message;
+            //if (message.role === "user") continue;
+            if (message.is_user) continue;
+
+            const swipeContent = message.mes;
             const state = parseStateFromMessage(swipeContent);
             if (state) {
                 console.log(`[${SCRIPT_NAME}] State loaded from message at index ${i}.`);
@@ -246,29 +248,44 @@
     // --- MAIN HANDLERS ---
 
     async function processMessageState(index) {
+
+        if (isProcessingState){
+            console.log("[SAM] already processing message state, aborting");
+            return;
+        }
+        isProcessingState = true;
+
         
         // -> we must have that message at index exists. Therefore we do not need to search it down
         // getChatMessages returns an ERROR. we must try-catch it.
 
+        if (index === "{{lastMessageId}}"){
+            index = SillyTavern.chat.length;
+        }
+
         var lastAIMessage = null;
         try{
-            lastAIMessage = await getChatMessages(index)[0];
+            // not using getMessages anymore. getMessages sucks ass.
+            lastAIMessage = SillyTavern.chat[index];
         }catch(e){
             console.log(`[SAM] processMessageState: Invalid index ${index}`);
             return;
         }
 
         // exc handling: if last message does not have content / role === "user" then return         
-        if (!lastAIMessage || lastAIMessage.role === "user") return;
+        if (!lastAIMessage || lastAIMessage.is_user) return;
 
         // get latest tavern variable JSON
+
+
         var state = await getVariables();
 
         // handle all commands scheduled to execute at T = current
         // promote all promote-able commands
         const promotedCommands = await processVolatileUpdates(state);
-
-        var messageContent = lastAIMessage.message;
+        
+        // now using official ST docs. Extract mes from it first and the rest is plug
+        var messageContent = lastAIMessage.mes;
 
         let match;
         const results = [];
@@ -286,9 +303,11 @@
         state = await applyCommandsToState([...promotedCommands, ...newCommands], state);
 
         // finally, write the newest state/ replace the newest state into the current latest message.
+        console.log("[SAM] Replacing variables in Process Message State");
+
+
         await replaceVariables(goodCopy(state));
-        state = await getVariables();
-        
+
         const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
 
         const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(state, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
@@ -297,48 +316,61 @@
         //console.log(`[SAM] finalContent = ${finalContent}`);
 
         // setting current chat message.
-        index = lastAIMessage.message_id;
         await setChatMessage({message: finalContent}, index);
+
+        isProcessingState = false;
 
     }
 
     async function loadStateFromMessage(index) {
+        if (index === "{{lastMessageId}}"){
+            index = SillyTavern.chat.length -1;
+        }
 
         var message = ""
         try {
-            var message = await getChatMessages(index)[0];
+            var message = SillyTavern.chat[index];
         } catch (e) {
             console.log(`[SAM] Load state from message: Failed to get at index= ${index}, likely the index does not exist. SAM will keep old state. Error message: ${e}`);
             return;
         }
 
-        const messageContent = message.message;
+        const messageContent = message.mes;
 
         const state = parseStateFromMessage(messageContent);
         if (state) {
+            console.log("[SAM] Replacing variables in LoadStateFromMessage");
+            
+
             await replaceVariables(goodCopy(state));
+
         } else {
-            const chatHistory = await getChatMessages(`0-${index}`);
+            //const chatHistory = await getChatMessages(`0-${index}`);
+            const chatHistory = SillyTavern.chat;
             const lastKnownState = await findLatestState(chatHistory);
+
+            console.log("[SAM] Replacing variables in LoadStateFromMessage and cannot find latest state")
+
+
             await replaceVariables(goodCopy(lastKnownState));
         }
     }
     
     async function findLastAiMessageAndIndex(beforeIndex) {
-        const chat = await getChatMessages("0-{{lastMessageId}}");
+        const chat = SillyTavern.chat;
 
         if (beforeIndex === -1){
             beforeIndex = chat.length;
         }
 
         for (let i = beforeIndex - 1; i >= 0; i--) {
-            if (chat[i].role !== "user") return i;
+            if (chat[i].is_user === false) return i;
         }
         return -1;
     }
 
     // --- EVENT LISTENER REGISTRATION ---
-$(async () => {
+$(() => {
     try {
         console.log(`[${SCRIPT_NAME}] State management loading. GLHF, player.`);
 
@@ -347,11 +379,12 @@ $(async () => {
             const lastAiIndex = await findLastAiMessageAndIndex(-1);
             if (lastAiIndex === -1) {
                 console.log(`[${SCRIPT_NAME}] No AI messages found. Initializing with default state.`);
+
+
                 await replaceVariables(_.cloneDeep(INITIAL_STATE));
+
                 return;
             }
-            const lastIndex = (await getChatMessages("{{lastMessageId}}"))[0].message_id;
-            
 
             await loadStateFromMessage(lastAiIndex);
         }
@@ -359,7 +392,6 @@ $(async () => {
         const update_events = [
             tavern_events.GENERATION_ENDED
         ];
-
         update_events.forEach(eventName => {
             eventOn(eventName, async () => {
                 console.log(`[${SCRIPT_NAME}] detected new message`);
@@ -389,7 +421,7 @@ $(async () => {
             console.log(`[${SCRIPT_NAME}] detected edit`);
             var message;
             try{
-                message = (await getChatMessages("{{lastMessageId}}"))[0];
+                message = SillyTavern.chat[SillyTavern.chat.length-1];
                 if (message === undefined) return;
             } catch (e){
                 return;
@@ -400,6 +432,7 @@ $(async () => {
                     // if it is an AI message, reload its state. This allows manual editing of the state block.
                     const lastAiIndex = await findLastAiMessageAndIndex(-1);
                     await loadStateFromMessage(lastAiIndex);
+                    return;
                 }
             } catch (error) { 
                 console.error(`[${SCRIPT_NAME}] Error in MESSAGE_EDITED handler:`, error); 
@@ -416,7 +449,7 @@ $(async () => {
         });
 
         // Initial load for the very first time the script runs.
-        await initializeOrReloadStateForCurrentChat();
+        initializeOrReloadStateForCurrentChat();
 
     } catch (error) {
          console.error(`[${SCRIPT_NAME}] Error during initialization:`, error);
