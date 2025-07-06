@@ -139,8 +139,10 @@
                     case 'RESPONSE_SUMMARY': {
                         if (!state.responseSummary) state.responseSummary = [];
 
+                        if (!state.responseSummary.includes(command.params.trim())){
+                           state.responseSummary.push(command.params.trim());
+                        }
 
-                        state.responseSummary.push(command.params.trim());
                         
                         break;
                     }
