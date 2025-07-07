@@ -114,7 +114,9 @@
                         if (!varName || incrementStr === undefined) continue;
                         const existing = _.get(state.static, varName, 0);
                         if (Array.isArray(existing)) {
+                            
                             existing.push(incrementStr);
+
                         } else {
                             const increment = Number(incrementStr);
                             const baseValue = Number(existing) || 0;
@@ -210,7 +212,13 @@
                 newCommands.push({type: match.groups.type, params: match.groups.params});
             }
             
-            const newState = await applyCommandsToState([...promotedCommands, ...newCommands], state);
+            console.log(`[SAM] ---- Got commands ----`);
+            for (let command of newCommands){
+                console.log(`[SAM] Got command: ${command.type}, ${command.params} `);
+
+            }
+            const newState = await applyCommandsToState([...promotedCommands, ...newCommands], state); 
+            // definitely called multiple times. This is an error.
             
             await replaceVariables(goodCopy(newState));
             
@@ -279,7 +287,8 @@
         handleMessageSwiped: async () => {
             console.log(`[${SCRIPT_NAME}] Message swiped, reloading state.`);
             try {
-                const lastAIMessageIndex = await findLastAiMessageAndIndex(-1);
+                // upon swipe, it is definitely impossible to still read at level K. However, swipe means we already have length K. Therefore, we read at level K-1.
+                const lastAIMessageIndex = await findLastAiMessageAndIndex(SillyTavern.chat.length-1);
                 if (lastAIMessageIndex !== -1) {
                     await loadStateFromMessage(lastAIMessageIndex);
                 }
@@ -324,22 +333,48 @@
         }
     };
     
-    // --- SCRIPT LIFECYCLE (SETUP & TEARDOWN) ---
+
+
+// --------------------------------------------------------- MORE ROBUST LISTENER MANAGEMENT ------------------------------------
+    // A dedicated function to remove all listeners this script adds.
+    const removeAllListeners = () => {
+        console.log(`[${SCRIPT_NAME}] Removing existing event listeners.`);
+        const update_events = [tavern_events.GENERATION_ENDED];
+        update_events.forEach(eventName => {
+            // Note: We use the same function reference from eventHandlers
+            eventRemoveListener(eventName, eventHandlers.handleGenerationEnded);
+        });
+        eventRemoveListener(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
+        eventRemoveListener(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
+        eventRemoveListener(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
+    };
+
+    // A dedicated function to add all listeners.
+    const addAllListeners = () => {
+        console.log(`[${SCRIPT_NAME}] Registering event listeners.`);
+        const update_events = [tavern_events.GENERATION_ENDED];
+        update_events.forEach(eventName => {
+            eventOn(eventName, eventHandlers.handleGenerationEnded);
+        });
+        eventOn(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
+        eventOn(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
+        eventOn(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
+    };
+
+
+    // --- MAIN EXECUTION ---
     $(() => {
-        // SETUP: This runs when the script is loaded.
+        // This block now runs safely every time the script is injected or reloaded.
         try {
             console.log(`[${SCRIPT_NAME}] State management loading. GLHF, player.`);
 
-            // Register all event listeners
-            const update_events = [tavern_events.GENERATION_ENDED];
-            update_events.forEach(eventName => {
-                eventOn(eventName, eventHandlers.handleGenerationEnded);
-            });
-            eventOn(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
-            eventOn(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
-            eventOn(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
+            // 1. ALWAYS clean up first to remove any listeners from a previous script load.
+            removeAllListeners();
 
-            // Initial load for the very first time the script runs.
+            // 2. NOW, register the listeners fresh.
+            addAllListeners();
+
+            // 3. Perform initial load.
             eventHandlers.initializeOrReloadStateForCurrentChat();
 
         } catch (error) {
@@ -347,17 +382,10 @@
         }
     });
 
-    $(window).on('unload', () => {
-        // TEARDOWN: This runs when the script is about to be unloaded (e.g., page navigation, extension reload).
-        console.log(`[${SCRIPT_NAME}] Unloading and removing event listeners.`);
-        
-        const update_events = [tavern_events.GENERATION_ENDED];
-        update_events.forEach(eventName => {
-            eventRemoveListener(eventName, eventHandlers.handleGenerationEnded);
-        });
-        eventRemoveListener(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
-        eventRemoveListener(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
-        eventRemoveListener(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
-    });
+    // The 'unload' handler is no longer necessary for listener cleanup,
+    // as our setup is now self-healing. You could keep it for other
+    // teardown tasks if needed, but it's not reliable for this purpose.
+    //
+    $(window).on('unload', () => { removeAllListeners();});
 
 })();
