@@ -29,7 +29,7 @@ SAM 的工作方式是在每条 AI 的消息中嵌入一个隐藏的 JSON 数据
 
 要使用 SAM，你必须在**对话的第一条 AI 消息中“初始化”状态**。
 
-1.  **安装脚本：** 复制 `SAM.js` 的代码，并将其粘贴到你 SillyTavern `public/extensions` 文件夹下的一个新文件中，例如命名为 `SAM.js`。然后在扩展面板中激活它。
+1.  **安装脚本：** 复制 `SAM.js` 的代码，并将其粘贴到你 SillyTavern 酒馆助手 文件夹下的一个新文件中，例如命名为 `SAM.js`。 在脚本面板中激活它。
 2.  **开始新对话：** 与你的角色创建一个新的聊天。
 3.  **编辑第一条消息：** 编辑角色的第一句问候语。在消息的末尾，添加初始状态块。
 
@@ -228,7 +228,7 @@ This creates an unbroken chain of state, ensuring data is never lost.
 
 To use SAM, you must "initialize" the state in the **first AI message of the chat**.
 
-1.  **Install the Script:** Copy the `SAM.js` code and paste it into a new file in your SillyTavern `public/extensions` folder. Give it a name like `SAM.js`. Activate it in the extensions panel.
+1.  **Install the Script:** Copy the `SAM.js` code and paste it into a new file in your SillyTavern's JS-slash-runner's scripts folder. Give it a name like `SAM.js`. Activate it in the scripts panel.
 2.  **Start a New Chat:** Create a new chat with your character.
 3.  **Edit the First Message:** Edit the character's very first greeting message. At the end of the message, add the initial state block.
 
