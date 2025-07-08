@@ -1,11 +1,11 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 1.8
+// == Version: 1.9
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
 // == functions, ensuring proper variable display and structure.
-// == It now includes proper event listener cleanup on unload.
+// == It now includes proper handling for deleted events.
 // ============================================================================
 
 (function () {
@@ -29,9 +29,9 @@
     // SET:          Sets a variable to a value. <SET :: path.to.var :: value>
     // ADD:          Adds a number to a variable, or an item to a list. <ADD :: path.to.var :: value>
     // DEL:          Deletes an item from a list by its numerical index. <DEL :: list_path :: index>
-    // REMOVE:       Removes item(s) from a list of objects where a property matches a value. <REMOVE :: list_path :: property_name :: value>
-    // TIMED_SET:    Schedules a SET command to run after a delay. <TIMED_SET :: ...>
-    // CANCEL_SET:   Cancels a scheduled TIMED_SET. <CANCEL_SET :: ...>
+    // REMOVE:       Removes item(s) from a list of objects where a property matches a value. <REMOVE :: list_path :: property lodash path :: value>
+    // TIMED_SET:    Schedules a SET command to run after a delay. <TIMED_SET :: path.to.var :: new_value :: reason :: is_real_time? :: timepoint>
+    // CANCEL_SET:   Cancels a scheduled TIMED_SET. <CANCEL_SET :: index or reason>
     // RESPONSE_SUMMARY: Adds a summary of the AI's response to a list. <RESPONSE_SUMMARY :: text>
 
 
@@ -297,6 +297,20 @@
             }
         },
 
+        handleMessageDeleted: async () => {
+            console.log(`[${SCRIPT_NAME}] Message deleted, reloading last state`);
+            try {
+                // always load the latest json upon deletion.
+                const lastAIMessageIndex = await findLastAiMessageAndIndex(SillyTavern.chat.length);
+                if (lastAIMessageIndex !== -1) {
+                    await loadStateFromMessage(lastAIMessageIndex);
+                }
+            } catch (error) {
+                console.error(`[${SCRIPT_NAME}] Error in MESSAGE_DELETED handler:`, error);
+            }
+
+        },
+
         // Handles editing a message.
         handleMessageEdited: async () => {
             console.log(`[${SCRIPT_NAME}] Message edited, reloading state.`);
@@ -345,6 +359,7 @@
             eventRemoveListener(eventName, eventHandlers.handleGenerationEnded);
         });
         eventRemoveListener(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
+        eventRemoveListener(tavern_events.MESSAGE_DELETED, eventHandlers.handleMessageDeleted);
         eventRemoveListener(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
         eventRemoveListener(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
     };
@@ -357,6 +372,7 @@
             eventOn(eventName, eventHandlers.handleGenerationEnded);
         });
         eventOn(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
+        eventOn(tavern_events.MESSAGE_DELETED, eventHandlers.handleMessageDeleted);
         eventOn(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
         eventOn(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
     };
