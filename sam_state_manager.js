@@ -288,7 +288,7 @@
             console.log(`[${SCRIPT_NAME}] Message swiped, reloading state.`);
             try {
                 // upon swipe, it is definitely impossible to still read at level K. However, swipe means we already have length K. Therefore, we read at level K-1.
-                const lastAIMessageIndex = await findLastAiMessageAndIndex(SillyTavern.chat.length-1);
+                const lastAIMessageIndex = await findLastAiMessageAndIndex(SillyTavern.chat.length);
                 if (lastAIMessageIndex !== -1) {
                     await loadStateFromMessage(lastAIMessageIndex);
                 }
