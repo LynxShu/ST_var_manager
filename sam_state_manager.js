@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 2.0
+// == Version: 2.1 (Listener Fix)
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -16,12 +16,33 @@
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
 
-    // --- MODIFIED --- Added EVAL to the regex
-    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\s*::\s*(?<params>[\s\S]*?)>/g;
+    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\s*::\s*(?<params>[\s\\S]*?)>/g;
 
-    // --- MODIFIED --- Added 'func' to the initial state
     const INITIAL_STATE = { static: {}, volatile: [], responseSummary: [], func: [] };
     let isProcessingState = false;
+
+    // --- MODIFIED --- SCRIPT LIFECYCLE MANAGEMENT ---
+    // This key is used to store our event handlers on the global window object.
+    // This allows a new instance of the script to find and remove the listeners
+    // from the old instance, preventing the "multiple listener" error.
+    const HANDLER_STORAGE_KEY = `__SAM_V2_EVENT_HANDLERS__`;
+
+    // This function can remove listeners using a given handler object.
+    const cleanupListeners = (handlers) => {
+        if (!handlers) return;
+        console.log(`[${SCRIPT_NAME}] Removing listeners from a previous instance.`);
+        eventRemoveListener(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
+        eventRemoveListener(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
+        eventRemoveListener(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
+        eventRemoveListener(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
+        eventRemoveListener(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
+    };
+
+    // On script load, check if an old set of handlers exists on the window and clean them up.
+    if (window[HANDLER_STORAGE_KEY]) {
+        cleanupListeners(window[HANDLER_STORAGE_KEY]);
+    }
+    // --- END MODIFICATION ---
 
     // --- Command Explanations ---
     // SET:          Sets a variable to a value. <SET :: path.to.var :: value>
@@ -37,30 +58,26 @@
     // Syntax:       <EVAL :: function_name :: param1 :: param2 :: ...>
     // WARNING: DANGEROUS FUNCTIONALITY. KNOW WHAT YOU ARE DOING, I WILL NOT TAKE RESPONSIBILITY FOR YOUR FAILURES AS STATED IN LICENSE.
     // YOU HAVE BEEN WARNED.
-    // State Structure for functions:
-    /*
-    "func": [
-        {
-            "func_name": "myFunction",
-            "func_params": ["param1", "someOtherParam"],
-            "func_body": "state.static.someValue = param1 + someOtherParam; return 'Success!';",
-            "timeout": 2000, // Optional, in milliseconds. Default is 2000ms.
-            "network_access": false // Optional, boolean. Default is false.
-        }
-    ]
-    */
+    /* ... (rest of documentation) ... */
 
     // --- HELPER FUNCTIONS ---
     async function getRoundCounter(){
         return SillyTavern.chat.length -1;
     }
 
+    function tryParseJSON(str) {
+    try {
+        return JSON.parse(str);
+    } catch (e) {
+        return str; // Return original string if it's not valid JSON
+    }
+}
+
     function parseStateFromMessage(messageContent) {
         if (!messageContent) return null;
         const match = messageContent.match(STATE_BLOCK_PARSE_REGEX);
         if (match && match[1]) {
             try {
-                // --- MODIFIED --- Ensure the state has all required keys
                 const parsed = JSON.parse(match[1].trim());
                 return {
                     static: parsed.static ?? {},
@@ -73,17 +90,18 @@
                 return _.cloneDeep(INITIAL_STATE);
             }
         }
-        return null; // Return null if no state block is found
+        return null;
     }
 
-    async function findLatestState(chatHistory) {
-        for (let i = chatHistory.length - 1; i >= 0; i--) {
+    async function findLatestState(chatHistory, lastIndex = chatHistory.length-1) {
+        console.log(`[SAM] finding latest state down from ${lastIndex}`);
+        for (let i = lastIndex; i >= 0; i--) {
             const message = chatHistory[i];
             if (message.is_user) continue;
 
             const state = parseStateFromMessage(message.mes);
             if (state) {
-                console.log(`[${SCRIPT_NAME}] State loaded from message at index ${i}.`);
+                console.log(`[${SCRIPT_NAME}] Found latest state, State loaded from message at index ${i}.`);
                 return _.cloneDeep(state);
             }
         }
@@ -108,25 +126,18 @@
         const allowNetwork = funcDef.network_access === true;
         const paramNames = funcDef.func_params || [];
 
-        // Create a promise for the function execution
         const executionPromise = new Promise(async (resolve, reject) => {
             try {
-                // 1. Prepare sandboxing for network access
                 const networkBlocker = () => { throw new Error('EVAL: Network access is disabled for this function.'); };
                 const fetchImpl = allowNetwork ? window.fetch.bind(window) : networkBlocker;
                 const xhrImpl = allowNetwork ? window.XMLHttpRequest : networkBlocker;
 
-                // 2. Define the arguments and their values for the dynamic function
-                // The function will have access to: state, _ (lodash), its defined params, and the sandboxed network functions
                 const argNames = ['state', '_', 'fetch', 'XMLHttpRequest', ...paramNames];
                 const argValues = [state, _, fetchImpl, xhrImpl, ...params];
 
-                // 3. Create the function from its string body
-                // The 'use strict' pragma is a good security practice.
                 const functionBody = `'use strict';\n${funcDef.func_body}`;
                 const userFunction = new Function(...argNames, functionBody);
 
-                // 4. Execute the function with the provided context and arguments
                 const result = await userFunction.apply(null, argValues);
                 resolve(result);
 
@@ -135,12 +146,10 @@
             }
         });
 
-        // Create a timeout promise
         const timeoutPromise = new Promise((_, reject) => {
             setTimeout(() => reject(new Error(`EVAL: Function '${funcName}' timed out after ${timeout}ms.`)), timeout);
         });
 
-        // Race the execution against the timeout
         try {
             const result = await Promise.race([executionPromise, timeoutPromise]);
             console.log(`[${SCRIPT_NAME}] EVAL: Function '${funcName}' executed successfully.`, { result });
@@ -151,7 +160,7 @@
 
 
     // --- CORE LOGIC ---
-
+    // ... (All core logic functions like processVolatileUpdates, applyCommandsToState, etc. remain unchanged) ...
     async function processVolatileUpdates(state) {
         if (!state.volatile || !state.volatile.length) return [];
         const promotedCommands = [];
@@ -174,39 +183,25 @@
     async function applyCommandsToState(commands, state) {
         const currentRound = await getRoundCounter();
         for (const command of commands) {
-            const params = command.params.split('::').map(p => p.trim());
+            let params = command.params.split('::').map(p => p.trim());
             
             try {
                 switch (command.type) {
-                    // (Existing cases: SET, ADD, etc. remain unchanged)
                     case 'SET': {
-                        const [varName, varValue] = params;
+                        let [varName, varValue] = params;
                         if (!varName || varValue === undefined) continue;
 
-
-                        // special values.
                         if (["true", "false", "undefined", "null"].includes(varValue.trim().toLowerCase())){
-                            
                             varValue = varValue.trim().toLowerCase();
-                            if (varValue === "true"){
-                                varValue = true;
-                            }
-
-                            if (varValue === "false"){
-                                varValue = false;
-                            }
-
-                            if (varValue === "undefined"){
-                                varValue = undefined;
-                            }
-
-                            if (varValue === "null"){
-                                varValue = null;
-                            }
-
+                            if (varValue === "true") varValue = true;
+                            if (varValue === "false") varValue = false;
+                            if (varValue === "undefined") varValue = undefined;
+                            if (varValue === "null") varValue = null;
                         }
 
-                        _.set(state.static, varName, isNaN(varValue) ? varValue : Number(varValue));
+                        
+
+                        _.set(state.static, varName, isNaN(varValue) ? tryParseJSON(varValue) : Number(varValue));
                         break;
                     }
                     case 'ADD': {
@@ -214,7 +209,7 @@
                         if (!varName || incrementStr === undefined) continue;
                         const existing = _.get(state.static, varName, 0);
                         if (Array.isArray(existing)) {
-                            existing.push(incrementStr);
+                            existing.push(tryParseJSON(incrementStr));
                         } else {
                             const increment = Number(incrementStr);
                             const baseValue = Number(existing) || 0;
@@ -224,7 +219,9 @@
                         break;
                     }
                     case 'RESPONSE_SUMMARY': {
-                        if (!state.responseSummary) state.responseSummary = [];
+                        if (!Array.isArray(state.responseSummary)) {
+                            state.responseSummary = state.responseSummary ? [state.responseSummary] : [];
+                        }
                         if (!state.responseSummary.includes(command.params.trim())){
                            state.responseSummary.push(command.params.trim());
                         }
@@ -234,7 +231,7 @@
                         const [varName, varValue, reason, isGameTimeStr, timeUnitsStr] = params;
                         if (!varName || !varValue || !reason || !isGameTimeStr || !timeUnitsStr) continue;
                         const isGameTime = isGameTimeStr.toLowerCase() === 'true';
-                        const finalValue = isNaN(varValue) ? varValue : Number(varValue);
+                        const finalValue = isNaN(varValue) ? tryParseJSON(finalValue) : Number(varValue);
                         const targetTime = isGameTime ? new Date(timeUnitsStr).toISOString() : currentRound + Number(timeUnitsStr);
                         if(!state.volatile) state.volatile = [];
                         state.volatile.push([varName, finalValue, isGameTime, targetTime, reason]);
@@ -274,15 +271,12 @@
                         _.set(state.static, listPath, _.reject(list, {[identifier]: targetId}));
                         break;
                     }
-
                     case 'EVAL': {
                         const [funcName, ...funcParams] = params;
                         if (!funcName) {
                             console.warn(`[${SCRIPT_NAME}] EVAL aborted: EVAL command requires a function name.`);
                             continue;
                         }
-                        // The state object is passed by reference, so any modifications
-                        // made by the sandboxed function will persist.
                         await runSandboxedFunction(funcName, funcParams, state);
                         break;
                     }
@@ -295,8 +289,10 @@
     }
 
     // --- MAIN HANDLERS ---
-    // (No changes needed in processMessageState, loadStateFromMessage, or the event handlers)
+    // ... (All main handlers like processMessageState, loadStateFromMessage, etc. remain unchanged) ...
     async function processMessageState(index) {
+        console.log(`[SAM] processing message state at ${index}`);
+
         if (isProcessingState) return;
         isProcessingState = true;
         
@@ -341,6 +337,30 @@
         if (index === "{{lastMessageId}}") {
             index = SillyTavern.chat.length - 1;
         }
+        try {
+            const message = SillyTavern.chat[index];
+            if (!message) return;
+            const state = parseStateFromMessage(message.mes);
+            
+            if (state) {
+                console.log(`[SAM] replacing variables with found state at index ${index}`);
+                await replaceVariables(goodCopy(state));
+            } else {
+                console.log("[SAM] did not find valid state at index, replacing with latest state")
+                const chatHistory = SillyTavern.chat;
+                const lastKnownState = await findLatestState(chatHistory);
+                await replaceVariables(goodCopy(lastKnownState));
+            }
+        } catch (e) {
+            console.log(`[${SCRIPT_NAME}] Load state from message failed for index ${index}:`, e);
+        }
+    }
+    
+    async function loadPreviousStateFromMessage(index) {
+        console.log("[SAM] LOADING previous state from a previous messgae");
+        if (index === "{{lastMessageId}}") {
+            index = SillyTavern.chat.length - 1;
+        }
 
         try {
             const message = SillyTavern.chat[index];
@@ -352,7 +372,7 @@
                 await replaceVariables(goodCopy(state));
             } else {
                 const chatHistory = SillyTavern.chat;
-                const lastKnownState = await findLatestState(chatHistory);
+                const lastKnownState = await findLatestState(chatHistory, index);
                 await replaceVariables(goodCopy(lastKnownState));
             }
         } catch (e) {
@@ -383,12 +403,17 @@
             }
         },
         handleMessageSwiped: async () => {
-            console.log(`[${SCRIPT_NAME}] Message swiped, reloading state.`);
+            console.log(`[${SCRIPT_NAME}] Message swiped, reloading state. `);
             try {
-                const lastAIMessageIndex = await findLastAiMessageAndIndex(SillyTavern.chat.length);
-                if (lastAIMessageIndex !== -1) {
+                let lastAIMessageIndex = await findLastAiMessageAndIndex(SillyTavern.chat.length);
+
+                if (lastAIMessageIndex == 0){
                     await loadStateFromMessage(lastAIMessageIndex);
+                }else{
+                    await loadPreviousStateFromMessage(lastAIMessageIndex - 1); // always go for the previous one.
                 }
+
+                console.log("[SAM] swipe finished");
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Error in MESSAGE_SWIPED handler:`, error);
             }
@@ -436,14 +461,9 @@
         }
     };
     
-    const removeAllListeners = () => {
-        console.log(`[${SCRIPT_NAME}] Removing existing event listeners.`);
-        eventRemoveListener(tavern_events.GENERATION_ENDED, eventHandlers.handleGenerationEnded);
-        eventRemoveListener(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
-        eventRemoveListener(tavern_events.MESSAGE_DELETED, eventHandlers.handleMessageDeleted);
-        eventRemoveListener(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
-        eventRemoveListener(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
-    };
+    // --- MODIFIED --- Simplified listener management
+    // We no longer need a separate `removeAllListeners` function for the hot-reload case.
+    // The cleanup logic at the top of the file handles that.
 
     const addAllListeners = () => {
         console.log(`[${SCRIPT_NAME}] Registering event listeners.`);
@@ -457,15 +477,24 @@
     // --- MAIN EXECUTION ---
     $(() => {
         try {
-            console.log(`[${SCRIPT_NAME}] V2.0 loading. GLHF, player.`);
-            removeAllListeners();
+            console.log(`[${SCRIPT_NAME}] V2.1 loading. GLHF, player.`);
+            // --- MODIFIED ---
+            // The old listeners were already cleaned up. We just need to add the new ones.
             addAllListeners();
+            // Store the newly created handlers on the window object for the *next* reload.
+            window[HANDLER_STORAGE_KEY] = eventHandlers;
+            // Initialize the state for the current chat.
             eventHandlers.initializeOrReloadStateForCurrentChat();
         } catch (error) {
             console.error(`[${SCRIPT_NAME}] Error during initialization:`, error);
         }
     });
     
-    $(window).on('unload', () => { removeAllListeners();});
+    // --- MODIFIED ---
+    // This `unload` event is for when the user closes the tab or navigates away.
+    // We use the same cleanup function to be good citizens.
+    $(window).on('unload', () => {
+        cleanupListeners(window[HANDLER_STORAGE_KEY]);
+    });
 
 })();
