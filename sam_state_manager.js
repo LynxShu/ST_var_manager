@@ -1,13 +1,18 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 2.2 (Swipe/Regen Fix)
+// == Version: 2.4 (Dry Run Event Fix)
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
 // == functions, ensuring proper variable display and structure.
-// == It now correctly handles state during swipes and regenerations by using
-// == the GENERATION_STARTED event to prepare the state, fixing a race condition.
+// == It correctly handles state during swipes and regenerations by using
+// == the GENERATION_STARTED event to prepare the state, fixing race conditions.
 // == It also includes a sandboxed EVAL command for user-defined functions.
+// ==
+// == v2.4 Fix: Replaces the manual phantom event flag with a proper check for
+// == the 'dry_run' parameter in the GENERATION_STARTED event. This is a
+// == cleaner, more reliable way to ignore generation events that are not
+// == intended to produce a new message (e.g., after a user message delete).
 // ============================================================================
 
 (function () {
@@ -33,7 +38,6 @@
     const cleanupListeners = (handlers) => {
         if (!handlers) return;
         console.log(`[${SCRIPT_NAME}] Removing listeners from a previous instance.`);
-        // NEW: Remove generation_started listener
         eventRemoveListener(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
         eventRemoveListener(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
         eventRemoveListener(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
@@ -366,8 +370,16 @@
 
     // --- EVENT HANDLER DEFINITIONS ---
     const eventHandlers = {
-        // NEW HANDLER: Prepares state BEFORE generation (for new messages and forward swipes/regens)
-        handleGenerationStarted: async () => {
+        handleGenerationStarted: async (ev, options, dry_run) => {
+            // NEW (v2.4): The GENERATION_STARTED event includes a 'dry_run' flag for
+            // actions that won't result in a new message. We check for this and
+            // ignore the event to prevent incorrect state loading.
+            console.log(`[SAM] Trying to determine if this is a dry run`);
+            if (dry_run === true) {
+                console.log(`[${SCRIPT_NAME}] Ignoring GENERATION_STARTED event (dry_run=true).`);
+                return;
+            }
+
             console.log(`[${SCRIPT_NAME}] Generation started, preparing state.`);
             try {
                 // The last message in the chat is the one causing the generation.
@@ -375,7 +387,7 @@
                 const lastMessage = SillyTavern.chat[lastMessageIndex];
                 
                 let sourceStateIndex;
-
+                
                 if (lastMessage && lastMessage.is_user === false) {
                     // This is a swipe or regeneration. The state should come from the AI message BEFORE this one.
                     console.log(`[SAM] Detected swipe/regen. Finding state before index ${lastMessageIndex}.`);
@@ -407,7 +419,6 @@
                 console.error(`[${SCRIPT_NAME}] Error in GENERATION_ENDED handler:`, error);
             }
         },
-        // MODIFIED HANDLER: Simplified for non-generative swipes (e.g., swiping back).
         handleMessageSwiped: async () => {
             console.log(`[${SCRIPT_NAME}] Message swiped, reloading state for current view.`);
             try {
@@ -423,8 +434,11 @@
                 console.error(`[${SCRIPT_NAME}] Error in MESSAGE_SWIPED handler:`, error);
             }
         },
-        handleMessageDeleted: async () => {
+        // The event provides the deleted message object as the first argument.
+        handleMessageDeleted: async (message) => {
             console.log(`[${SCRIPT_NAME}] Message deleted, reloading last state`);
+            // The logic to set a flag for phantom events is no longer needed,
+            // as we now handle the 'dry_run' parameter in GENERATION_STARTED.
             try {
                 const lastAIMessageIndex = await findLastAiMessageAndIndex();
                 if (lastAIMessageIndex !== -1) {
@@ -466,18 +480,19 @@
         },
         initializeOrReloadStateForCurrentChat: async () => {
             const lastAiIndex = await findLastAiMessageAndIndex();
+
             if (lastAiIndex === -1) {
                 console.log(`[${SCRIPT_NAME}] No AI messages found. Initializing with default state.`);
                 await replaceVariables(_.cloneDeep(INITIAL_STATE));
             } else {
                 await loadStateFromMessage(lastAiIndex);
+                
             }
         }
     };
     
     const addAllListeners = () => {
         console.log(`[${SCRIPT_NAME}] Registering event listeners.`);
-        // NEW: Add generation_started listener
         eventOn(tavern_events.GENERATION_STARTED, eventHandlers.handleGenerationStarted);
         eventOn(tavern_events.GENERATION_ENDED, eventHandlers.handleGenerationEnded);
         eventOn(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
@@ -489,7 +504,7 @@
     // --- MAIN EXECUTION ---
     $(() => {
         try {
-            console.log(`[${SCRIPT_NAME}] V2.2 loading. GLHF, player.`);
+            console.log(`[${SCRIPT_NAME}] V2.4 loading. GLHF, player.`);
             // The old listeners were already cleaned up. We just need to add the new ones.
             addAllListeners();
             // Store the newly created handlers on the window object for the *next* reload.
