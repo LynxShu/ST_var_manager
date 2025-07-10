@@ -1,11 +1,11 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 1.9
+// == Version: 2.0
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
 // == functions, ensuring proper variable display and structure.
-// == It now includes proper handling for deleted events.
+// == It now includes a sandboxed EVAL command for user-defined functions.
 // ============================================================================
 
 (function () {
@@ -13,27 +13,42 @@
     const SCRIPT_NAME = "Situational Awareness Manager";
     const STATE_BLOCK_START_MARKER = '<!--<|state|>';
     const STATE_BLOCK_END_MARKER = '</|state|>-->';
-
-    // NON-GREEDY (lazy): Used for PARSING a single, valid state block. Note the `*?`.
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
-
-    // GREEDY: Used for REMOVING all state blocks, from the first start to the last end. Note the `*`.
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
 
-    // Use a global flag for the regex to find all commands in one go.
-    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET)\s*::\s*(?<params>[\s\S]*?)>/g;
-    const INITIAL_STATE = { static: {}, volatile: [], responseSummary: [] };
+    // --- MODIFIED --- Added EVAL to the regex
+    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\s*::\s*(?<params>[\s\S]*?)>/g;
+
+    // --- MODIFIED --- Added 'func' to the initial state
+    const INITIAL_STATE = { static: {}, volatile: [], responseSummary: [], func: [] };
     let isProcessingState = false;
 
     // --- Command Explanations ---
     // SET:          Sets a variable to a value. <SET :: path.to.var :: value>
     // ADD:          Adds a number to a variable, or an item to a list. <ADD :: path.to.var :: value>
     // DEL:          Deletes an item from a list by its numerical index. <DEL :: list_path :: index>
-    // REMOVE:       Removes item(s) from a list of objects where a property matches a value. <REMOVE :: list_path :: property lodash path :: value>
-    // TIMED_SET:    Schedules a SET command to run after a delay. <TIMED_SET :: path.to.var :: new_value :: reason :: is_real_time? :: timepoint>
+    // REMOVE:       Removes item(s) from a list where a property matches a value. <REMOVE :: list_path :: property's relative path :: value>
+    // TIMED_SET:    Schedules a SET command. <TIMED_SET :: path.to.var :: new_value :: reason :: is_real_time? :: timepoint>
     // CANCEL_SET:   Cancels a scheduled TIMED_SET. <CANCEL_SET :: index or reason>
     // RESPONSE_SUMMARY: Adds a summary of the AI's response to a list. <RESPONSE_SUMMARY :: text>
-
+    //
+    // EVAL command documentation
+    // EVAL:         Executes a user-defined function stored in the state.
+    // Syntax:       <EVAL :: function_name :: param1 :: param2 :: ...>
+    // WARNING: DANGEROUS FUNCTIONALITY. KNOW WHAT YOU ARE DOING, I WILL NOT TAKE RESPONSIBILITY FOR YOUR FAILURES AS STATED IN LICENSE.
+    // YOU HAVE BEEN WARNED.
+    // State Structure for functions:
+    /*
+    "func": [
+        {
+            "func_name": "myFunction",
+            "func_params": ["param1", "someOtherParam"],
+            "func_body": "state.static.someValue = param1 + someOtherParam; return 'Success!';",
+            "timeout": 2000, // Optional, in milliseconds. Default is 2000ms.
+            "network_access": false // Optional, boolean. Default is false.
+        }
+    ]
+    */
 
     // --- HELPER FUNCTIONS ---
     async function getRoundCounter(){
@@ -45,13 +60,20 @@
         const match = messageContent.match(STATE_BLOCK_PARSE_REGEX);
         if (match && match[1]) {
             try {
-                return JSON.parse(match[1].trim());
+                // --- MODIFIED --- Ensure the state has all required keys
+                const parsed = JSON.parse(match[1].trim());
+                return {
+                    static: parsed.static ?? {},
+                    volatile: parsed.volatile ?? [],
+                    responseSummary: parsed.responseSummary ?? [],
+                    func: parsed.func ?? []
+                };
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Failed to parse state JSON.`, error);
-                return {};
+                return _.cloneDeep(INITIAL_STATE);
             }
         }
-        return {};
+        return null; // Return null if no state block is found
     }
 
     async function findLatestState(chatHistory) {
@@ -59,8 +81,7 @@
             const message = chatHistory[i];
             if (message.is_user) continue;
 
-            const swipeContent = message.mes;
-            const state = parseStateFromMessage(swipeContent);
+            const state = parseStateFromMessage(message.mes);
             if (state) {
                 console.log(`[${SCRIPT_NAME}] State loaded from message at index ${i}.`);
                 return _.cloneDeep(state);
@@ -71,14 +92,68 @@
     }
     
     function goodCopy(state) {
-        return _.cloneDeep(state) ?? {INITIAL_STATE};
+        return _.cloneDeep(state) ?? _.cloneDeep(INITIAL_STATE);
+    }
+
+    // --- NEW --- Sandboxed function executor
+    async function runSandboxedFunction(funcName, params, state) {
+        const funcDef = state.func?.find(f => f.func_name === funcName);
+
+        if (!funcDef) {
+            console.warn(`[${SCRIPT_NAME}] EVAL: Function '${funcName}' not found in state.func array.`);
+            return;
+        }
+
+        const timeout = funcDef.timeout ?? 2000;
+        const allowNetwork = funcDef.network_access === true;
+        const paramNames = funcDef.func_params || [];
+
+        // Create a promise for the function execution
+        const executionPromise = new Promise(async (resolve, reject) => {
+            try {
+                // 1. Prepare sandboxing for network access
+                const networkBlocker = () => { throw new Error('EVAL: Network access is disabled for this function.'); };
+                const fetchImpl = allowNetwork ? window.fetch.bind(window) : networkBlocker;
+                const xhrImpl = allowNetwork ? window.XMLHttpRequest : networkBlocker;
+
+                // 2. Define the arguments and their values for the dynamic function
+                // The function will have access to: state, _ (lodash), its defined params, and the sandboxed network functions
+                const argNames = ['state', '_', 'fetch', 'XMLHttpRequest', ...paramNames];
+                const argValues = [state, _, fetchImpl, xhrImpl, ...params];
+
+                // 3. Create the function from its string body
+                // The 'use strict' pragma is a good security practice.
+                const functionBody = `'use strict';\n${funcDef.func_body}`;
+                const userFunction = new Function(...argNames, functionBody);
+
+                // 4. Execute the function with the provided context and arguments
+                const result = await userFunction.apply(null, argValues);
+                resolve(result);
+
+            } catch (error) {
+                reject(error);
+            }
+        });
+
+        // Create a timeout promise
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(`EVAL: Function '${funcName}' timed out after ${timeout}ms.`)), timeout);
+        });
+
+        // Race the execution against the timeout
+        try {
+            const result = await Promise.race([executionPromise, timeoutPromise]);
+            console.log(`[${SCRIPT_NAME}] EVAL: Function '${funcName}' executed successfully.`, { result });
+        } catch (error) {
+            console.error(`[${SCRIPT_NAME}] EVAL: Error executing function '${funcName}'.`, error);
+        }
     }
 
 
     // --- CORE LOGIC ---
 
     async function processVolatileUpdates(state) {
-        if (!state.volatile.length) return [];
+        if (!state.volatile || !state.volatile.length) return [];
         const promotedCommands = [];
         const remainingVolatiles = [];
         const currentRound = await getRoundCounter();
@@ -103,9 +178,34 @@
             
             try {
                 switch (command.type) {
+                    // (Existing cases: SET, ADD, etc. remain unchanged)
                     case 'SET': {
                         const [varName, varValue] = params;
                         if (!varName || varValue === undefined) continue;
+
+
+                        // special values.
+                        if (["true", "false", "undefined", "null"].includes(varValue.trim().toLowerCase())){
+                            
+                            varValue = varValue.trim().toLowerCase();
+                            if (varValue === "true"){
+                                varValue = true;
+                            }
+
+                            if (varValue === "false"){
+                                varValue = false;
+                            }
+
+                            if (varValue === "undefined"){
+                                varValue = undefined;
+                            }
+
+                            if (varValue === "null"){
+                                varValue = null;
+                            }
+
+                        }
+
                         _.set(state.static, varName, isNaN(varValue) ? varValue : Number(varValue));
                         break;
                     }
@@ -114,9 +214,7 @@
                         if (!varName || incrementStr === undefined) continue;
                         const existing = _.get(state.static, varName, 0);
                         if (Array.isArray(existing)) {
-                            
                             existing.push(incrementStr);
-
                         } else {
                             const increment = Number(incrementStr);
                             const baseValue = Number(existing) || 0;
@@ -138,13 +236,13 @@
                         const isGameTime = isGameTimeStr.toLowerCase() === 'true';
                         const finalValue = isNaN(varValue) ? varValue : Number(varValue);
                         const targetTime = isGameTime ? new Date(timeUnitsStr).toISOString() : currentRound + Number(timeUnitsStr);
+                        if(!state.volatile) state.volatile = [];
                         state.volatile.push([varName, finalValue, isGameTime, targetTime, reason]);
                         break;
                     }
                     case 'CANCEL_SET': {
                         if (!params[0] || !state.volatile?.length) continue;
                         const identifier = params[0];
-                        const originalCount = state.volatile.length;
                         const index = parseInt(identifier, 10);
                         if (!isNaN(index) && index >= 0 && index < state.volatile.length) {
                             state.volatile.splice(index, 1);
@@ -173,13 +271,19 @@
                         if (!listPath || !identifier || targetId === undefined) continue;
                         const list = _.get(state.static, listPath);
                         if (!Array.isArray(list)) continue;
-                        const newList = list.filter(item => {
-                            if (typeof item !== 'object' || item === null || !item.hasOwnProperty(identifier)) {
-                                return true;
-                            }
-                            return item[identifier] != targetId;
-                        });
-                        _.set(state.static, listPath, newList);
+                        _.set(state.static, listPath, _.reject(list, {[identifier]: targetId}));
+                        break;
+                    }
+
+                    case 'EVAL': {
+                        const [funcName, ...funcParams] = params;
+                        if (!funcName) {
+                            console.warn(`[${SCRIPT_NAME}] EVAL aborted: EVAL command requires a function name.`);
+                            continue;
+                        }
+                        // The state object is passed by reference, so any modifications
+                        // made by the sandboxed function will persist.
+                        await runSandboxedFunction(funcName, funcParams, state);
                         break;
                     }
                 }
@@ -191,6 +295,7 @@
     }
 
     // --- MAIN HANDLERS ---
+    // (No changes needed in processMessageState, loadStateFromMessage, or the event handlers)
     async function processMessageState(index) {
         if (isProcessingState) return;
         isProcessingState = true;
@@ -212,13 +317,11 @@
                 newCommands.push({type: match.groups.type, params: match.groups.params});
             }
             
-            console.log(`[SAM] ---- Got commands ----`);
-            for (let command of newCommands){
-                console.log(`[SAM] Got command: ${command.type}, ${command.params} `);
-
+            if (newCommands.length > 0) {
+                 console.log(`[SAM] ---- Found ${newCommands.length} command(s) to process ----`);
             }
+
             const newState = await applyCommandsToState([...promotedCommands, ...newCommands], state); 
-            // definitely called multiple times. This is an error.
             
             await replaceVariables(goodCopy(newState));
             
@@ -243,8 +346,7 @@
             const message = SillyTavern.chat[index];
             if (!message) return;
 
-            const messageContent = message.mes;
-            const state = parseStateFromMessage(messageContent);
+            const state = parseStateFromMessage(message.mes);
             
             if (state) {
                 await replaceVariables(goodCopy(state));
@@ -270,9 +372,7 @@
     }
 
     // --- EVENT HANDLER DEFINITIONS ---
-    // We define handlers here so we have a stable reference for adding and removing them.
     const eventHandlers = {
-        // Handles new message generation.
         handleGenerationEnded: async () => {
             console.log(`[${SCRIPT_NAME}] Generation ended, processing state.`);
             try {
@@ -282,12 +382,9 @@
                 console.error(`[${SCRIPT_NAME}] Error in GENERATION_ENDED handler:`, error);
             }
         },
-
-        // Handles swiping to a different AI response.
         handleMessageSwiped: async () => {
             console.log(`[${SCRIPT_NAME}] Message swiped, reloading state.`);
             try {
-                // upon swipe, it is definitely impossible to still read at level K. However, swipe means we already have length K. Therefore, we read at level K-1.
                 const lastAIMessageIndex = await findLastAiMessageAndIndex(SillyTavern.chat.length);
                 if (lastAIMessageIndex !== -1) {
                     await loadStateFromMessage(lastAIMessageIndex);
@@ -296,36 +393,30 @@
                 console.error(`[${SCRIPT_NAME}] Error in MESSAGE_SWIPED handler:`, error);
             }
         },
-
         handleMessageDeleted: async () => {
             console.log(`[${SCRIPT_NAME}] Message deleted, reloading last state`);
             try {
-                // always load the latest json upon deletion.
                 const lastAIMessageIndex = await findLastAiMessageAndIndex(SillyTavern.chat.length);
                 if (lastAIMessageIndex !== -1) {
                     await loadStateFromMessage(lastAIMessageIndex);
+                } else {
+                    await eventHandlers.initializeOrReloadStateForCurrentChat();
                 }
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Error in MESSAGE_DELETED handler:`, error);
             }
-
         },
-
-        // Handles editing a message.
         handleMessageEdited: async () => {
             console.log(`[${SCRIPT_NAME}] Message edited, reloading state.`);
             try {
-                const lastMessage = SillyTavern.chat[SillyTavern.chat.length - 1];
-                if (lastMessage && !lastMessage.is_user) {
-                    const lastAiIndex = await findLastAiMessageAndIndex(-1);
+                const lastAiIndex = await findLastAiMessageAndIndex(-1);
+                if (lastAiIndex !== -1) {
                     await loadStateFromMessage(lastAiIndex);
                 }
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Error in MESSAGE_EDITED handler:`, error);
             }
         },
-
-        // Handles loading a new chat.
         handleChatChanged: async () => {
             console.log(`[${SCRIPT_NAME}] Chat changed, initializing state.`);
             try {
@@ -334,8 +425,6 @@
                 console.error(`[${SCRIPT_NAME}] Error in CHAT_CHANGED handler:`, error);
             }
         },
-
-        // Initializer function, also used by CHAT_CHANGED.
         initializeOrReloadStateForCurrentChat: async () => {
             const lastAiIndex = await findLastAiMessageAndIndex(-1);
             if (lastAiIndex === -1) {
@@ -347,61 +436,36 @@
         }
     };
     
-
-
-// --------------------------------------------------------- MORE ROBUST LISTENER MANAGEMENT ------------------------------------
-    // A dedicated function to remove all listeners this script adds.
     const removeAllListeners = () => {
         console.log(`[${SCRIPT_NAME}] Removing existing event listeners.`);
-        const update_events = [tavern_events.GENERATION_ENDED];
-        update_events.forEach(eventName => {
-            // Note: We use the same function reference from eventHandlers
-            eventRemoveListener(eventName, eventHandlers.handleGenerationEnded);
-        });
+        eventRemoveListener(tavern_events.GENERATION_ENDED, eventHandlers.handleGenerationEnded);
         eventRemoveListener(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
         eventRemoveListener(tavern_events.MESSAGE_DELETED, eventHandlers.handleMessageDeleted);
         eventRemoveListener(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
         eventRemoveListener(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
     };
 
-    // A dedicated function to add all listeners.
     const addAllListeners = () => {
         console.log(`[${SCRIPT_NAME}] Registering event listeners.`);
-        const update_events = [tavern_events.GENERATION_ENDED];
-        update_events.forEach(eventName => {
-            eventOn(eventName, eventHandlers.handleGenerationEnded);
-        });
+        eventOn(tavern_events.GENERATION_ENDED, eventHandlers.handleGenerationEnded);
         eventOn(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
         eventOn(tavern_events.MESSAGE_DELETED, eventHandlers.handleMessageDeleted);
         eventOn(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
         eventOn(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
     };
 
-
     // --- MAIN EXECUTION ---
     $(() => {
-        // This block now runs safely every time the script is injected or reloaded.
         try {
-            console.log(`[${SCRIPT_NAME}] State management loading. GLHF, player.`);
-
-            // 1. ALWAYS clean up first to remove any listeners from a previous script load.
+            console.log(`[${SCRIPT_NAME}] V2.0 loading. GLHF, player.`);
             removeAllListeners();
-
-            // 2. NOW, register the listeners fresh.
             addAllListeners();
-
-            // 3. Perform initial load.
             eventHandlers.initializeOrReloadStateForCurrentChat();
-
         } catch (error) {
             console.error(`[${SCRIPT_NAME}] Error during initialization:`, error);
         }
     });
-
-    // The 'unload' handler is no longer necessary for listener cleanup,
-    // as our setup is now self-healing. You could keep it for other
-    // teardown tasks if needed, but it's not reliable for this purpose.
-    //
+    
     $(window).on('unload', () => { removeAllListeners();});
 
 })();
