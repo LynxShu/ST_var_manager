@@ -353,6 +353,8 @@
                 const lastKnownState = await findLatestState(chatHistory, index);
                 await replaceVariables(goodCopy(lastKnownState));
             }
+
+            await reloadCurrentChat();
         } catch (e) {
             console.log(`[${SCRIPT_NAME}] Load state from message failed for index ${index}:`, e);
         }
@@ -479,6 +481,7 @@
             }
         },
         initializeOrReloadStateForCurrentChat: async () => {
+            console.log("[SAM] trying to initialize first message");
             const lastAiIndex = await findLastAiMessageAndIndex();
 
             if (lastAiIndex === -1) {
