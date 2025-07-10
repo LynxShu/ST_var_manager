@@ -1,11 +1,13 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 2.1 (Listener Fix)
+// == Version: 2.2 (Swipe/Regen Fix)
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
 // == functions, ensuring proper variable display and structure.
-// == It now includes a sandboxed EVAL command for user-defined functions.
+// == It now correctly handles state during swipes and regenerations by using
+// == the GENERATION_STARTED event to prepare the state, fixing a race condition.
+// == It also includes a sandboxed EVAL command for user-defined functions.
 // ============================================================================
 
 (function () {
@@ -21,7 +23,7 @@
     const INITIAL_STATE = { static: {}, volatile: [], responseSummary: [], func: [] };
     let isProcessingState = false;
 
-    // --- MODIFIED --- SCRIPT LIFECYCLE MANAGEMENT ---
+    // --- SCRIPT LIFECYCLE MANAGEMENT ---
     // This key is used to store our event handlers on the global window object.
     // This allows a new instance of the script to find and remove the listeners
     // from the old instance, preventing the "multiple listener" error.
@@ -31,6 +33,8 @@
     const cleanupListeners = (handlers) => {
         if (!handlers) return;
         console.log(`[${SCRIPT_NAME}] Removing listeners from a previous instance.`);
+        // NEW: Remove generation_started listener
+        eventRemoveListener(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
         eventRemoveListener(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
         eventRemoveListener(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
         eventRemoveListener(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
@@ -42,7 +46,6 @@
     if (window[HANDLER_STORAGE_KEY]) {
         cleanupListeners(window[HANDLER_STORAGE_KEY]);
     }
-    // --- END MODIFICATION ---
 
     // --- Command Explanations ---
     // SET:          Sets a variable to a value. <SET :: path.to.var :: value>
@@ -66,12 +69,12 @@
     }
 
     function tryParseJSON(str) {
-    try {
-        return JSON.parse(str);
-    } catch (e) {
-        return str; // Return original string if it's not valid JSON
+        try {
+            return JSON.parse(str);
+        } catch (e) {
+            return str; // Return original string if it's not valid JSON
+        }
     }
-}
 
     function parseStateFromMessage(messageContent) {
         if (!messageContent) return null;
@@ -113,7 +116,7 @@
         return _.cloneDeep(state) ?? _.cloneDeep(INITIAL_STATE);
     }
 
-    // --- NEW --- Sandboxed function executor
+    // --- Sandboxed function executor
     async function runSandboxedFunction(funcName, params, state) {
         const funcDef = state.func?.find(f => f.func_name === funcName);
 
@@ -160,7 +163,6 @@
 
 
     // --- CORE LOGIC ---
-    // ... (All core logic functions like processVolatileUpdates, applyCommandsToState, etc. remain unchanged) ...
     async function processVolatileUpdates(state) {
         if (!state.volatile || !state.volatile.length) return [];
         const promotedCommands = [];
@@ -190,18 +192,15 @@
                     case 'SET': {
                         let [varName, varValue] = params;
                         if (!varName || varValue === undefined) continue;
-
-                        if (["true", "false", "undefined", "null"].includes(varValue.trim().toLowerCase())){
-                            varValue = varValue.trim().toLowerCase();
-                            if (varValue === "true") varValue = true;
-                            if (varValue === "false") varValue = false;
-                            if (varValue === "undefined") varValue = undefined;
-                            if (varValue === "null") varValue = null;
+                        varValue = tryParseJSON(varValue);
+                         if (typeof varValue === 'string') {
+                            const lowerVar = varValue.trim().toLowerCase();
+                            if (lowerVar === "true") varValue = true;
+                            else if (lowerVar === "false") varValue = false;
+                            else if (lowerVar === "null") varValue = null;
+                            else if (lowerVar === "undefined") varValue = undefined;
                         }
-
-                        
-
-                        _.set(state.static, varName, isNaN(varValue) ? tryParseJSON(varValue) : Number(varValue));
+                        _.set(state.static, varName, isNaN(Number(varValue)) ? varValue : Number(varValue));
                         break;
                     }
                     case 'ADD': {
@@ -231,7 +230,7 @@
                         const [varName, varValue, reason, isGameTimeStr, timeUnitsStr] = params;
                         if (!varName || !varValue || !reason || !isGameTimeStr || !timeUnitsStr) continue;
                         const isGameTime = isGameTimeStr.toLowerCase() === 'true';
-                        const finalValue = isNaN(varValue) ? tryParseJSON(finalValue) : Number(varValue);
+                        const finalValue = isNaN(varValue) ? tryParseJSON(varValue) : Number(varValue);
                         const targetTime = isGameTime ? new Date(timeUnitsStr).toISOString() : currentRound + Number(timeUnitsStr);
                         if(!state.volatile) state.volatile = [];
                         state.volatile.push([varName, finalValue, isGameTime, targetTime, reason]);
@@ -268,7 +267,7 @@
                         if (!listPath || !identifier || targetId === undefined) continue;
                         const list = _.get(state.static, listPath);
                         if (!Array.isArray(list)) continue;
-                        _.set(state.static, listPath, _.reject(list, {[identifier]: targetId}));
+                        _.set(state.static, listPath, _.reject(list, {[identifier]: tryParseJSON(targetId)}));
                         break;
                     }
                     case 'EVAL': {
@@ -289,7 +288,6 @@
     }
 
     // --- MAIN HANDLERS ---
-    // ... (All main handlers like processMessageState, loadStateFromMessage, etc. remain unchanged) ...
     async function processMessageState(index) {
         console.log(`[SAM] processing message state at ${index}`);
 
@@ -348,30 +346,6 @@
             } else {
                 console.log("[SAM] did not find valid state at index, replacing with latest state")
                 const chatHistory = SillyTavern.chat;
-                const lastKnownState = await findLatestState(chatHistory);
-                await replaceVariables(goodCopy(lastKnownState));
-            }
-        } catch (e) {
-            console.log(`[${SCRIPT_NAME}] Load state from message failed for index ${index}:`, e);
-        }
-    }
-    
-    async function loadPreviousStateFromMessage(index) {
-        console.log("[SAM] LOADING previous state from a previous messgae");
-        if (index === "{{lastMessageId}}") {
-            index = SillyTavern.chat.length - 1;
-        }
-
-        try {
-            const message = SillyTavern.chat[index];
-            if (!message) return;
-
-            const state = parseStateFromMessage(message.mes);
-            
-            if (state) {
-                await replaceVariables(goodCopy(state));
-            } else {
-                const chatHistory = SillyTavern.chat;
                 const lastKnownState = await findLatestState(chatHistory, index);
                 await replaceVariables(goodCopy(lastKnownState));
             }
@@ -380,40 +354,71 @@
         }
     }
     
-    async function findLastAiMessageAndIndex(beforeIndex) {
+    async function findLastAiMessageAndIndex(beforeIndex = -1) {
         const chat = SillyTavern.chat;
-        if (beforeIndex === -1) {
-            beforeIndex = chat.length;
-        }
-        for (let i = beforeIndex - 1; i >= 0; i--) {
-            if (chat[i].is_user === false) return i;
+        const searchUntil = (beforeIndex === -1) ? chat.length : beforeIndex;
+
+        for (let i = searchUntil - 1; i >= 0; i--) {
+            if (chat[i] && chat[i].is_user === false) return i;
         }
         return -1;
     }
 
     // --- EVENT HANDLER DEFINITIONS ---
     const eventHandlers = {
+        // NEW HANDLER: Prepares state BEFORE generation (for new messages and forward swipes/regens)
+        handleGenerationStarted: async () => {
+            console.log(`[${SCRIPT_NAME}] Generation started, preparing state.`);
+            try {
+                // The last message in the chat is the one causing the generation.
+                const lastMessageIndex = SillyTavern.chat.length - 1;
+                const lastMessage = SillyTavern.chat[lastMessageIndex];
+                
+                let sourceStateIndex;
+
+                if (lastMessage && lastMessage.is_user === false) {
+                    // This is a swipe or regeneration. The state should come from the AI message BEFORE this one.
+                    console.log(`[SAM] Detected swipe/regen. Finding state before index ${lastMessageIndex}.`);
+                    sourceStateIndex = await findLastAiMessageAndIndex(lastMessageIndex);
+                } else {
+                    // This is a new message generation. The state comes from the most recent AI message.
+                    console.log(`[SAM] Detected new message. Finding latest state.`);
+                    sourceStateIndex = await findLastAiMessageAndIndex();
+                }
+
+                if (sourceStateIndex !== -1) {
+                    console.log(`[SAM] Loading state from message at index ${sourceStateIndex} for new generation.`);
+                    await loadStateFromMessage(sourceStateIndex);
+                } else {
+                    console.log(`[SAM] No prior state found for new generation. Using initial state.`);
+                    await replaceVariables(_.cloneDeep(INITIAL_STATE));
+                }
+            } catch (error) {
+                console.error(`[${SCRIPT_NAME}] Error in GENERATION_STARTED handler:`, error);
+            }
+        },
         handleGenerationEnded: async () => {
             console.log(`[${SCRIPT_NAME}] Generation ended, processing state.`);
             try {
+                // The new message is now the last one in the chat.
                 const index = SillyTavern.chat.length - 1;
                 await processMessageState(index);
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Error in GENERATION_ENDED handler:`, error);
             }
         },
+        // MODIFIED HANDLER: Simplified for non-generative swipes (e.g., swiping back).
         handleMessageSwiped: async () => {
-            console.log(`[${SCRIPT_NAME}] Message swiped, reloading state. `);
+            console.log(`[${SCRIPT_NAME}] Message swiped, reloading state for current view.`);
             try {
-                let lastAIMessageIndex = await findLastAiMessageAndIndex(SillyTavern.chat.length);
-
-                if (lastAIMessageIndex == 0){
-                    await loadStateFromMessage(lastAIMessageIndex);
-                }else{
-                    await loadPreviousStateFromMessage(lastAIMessageIndex - 1); // always go for the previous one.
+                // The chat is already updated. We just need to load the state from the now-current last AI message.
+                const lastAiIndex = await findLastAiMessageAndIndex();
+                if (lastAiIndex !== -1) {
+                    await loadStateFromMessage(lastAiIndex);
+                } else {
+                    // If there are no AI messages left after the swipe, reset to initial state.
+                    await eventHandlers.initializeOrReloadStateForCurrentChat();
                 }
-
-                console.log("[SAM] swipe finished");
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Error in MESSAGE_SWIPED handler:`, error);
             }
@@ -421,7 +426,7 @@
         handleMessageDeleted: async () => {
             console.log(`[${SCRIPT_NAME}] Message deleted, reloading last state`);
             try {
-                const lastAIMessageIndex = await findLastAiMessageAndIndex(SillyTavern.chat.length);
+                const lastAIMessageIndex = await findLastAiMessageAndIndex();
                 if (lastAIMessageIndex !== -1) {
                     await loadStateFromMessage(lastAIMessageIndex);
                 } else {
@@ -432,11 +437,20 @@
             }
         },
         handleMessageEdited: async () => {
-            console.log(`[${SCRIPT_NAME}] Message edited, reloading state.`);
+            console.log(`[${SCRIPT_NAME}] Message edited, reprocessing/reloading state.`);
             try {
-                const lastAiIndex = await findLastAiMessageAndIndex(-1);
+                // An edit might change commands, so we should re-process the message.
+                const lastAiIndex = await findLastAiMessageAndIndex();
                 if (lastAiIndex !== -1) {
-                    await loadStateFromMessage(lastAiIndex);
+                    // Find the state from BEFORE the edited message to ensure a clean re-process.
+                    const stateSourceIndex = await findLastAiMessageAndIndex(lastAiIndex);
+                    if (stateSourceIndex !== -1) {
+                       await loadStateFromMessage(stateSourceIndex);
+                    } else {
+                       await replaceVariables(_.cloneDeep(INITIAL_STATE));
+                    }
+                    // Now process the edited message
+                    await processMessageState(lastAiIndex);
                 }
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Error in MESSAGE_EDITED handler:`, error);
@@ -451,7 +465,7 @@
             }
         },
         initializeOrReloadStateForCurrentChat: async () => {
-            const lastAiIndex = await findLastAiMessageAndIndex(-1);
+            const lastAiIndex = await findLastAiMessageAndIndex();
             if (lastAiIndex === -1) {
                 console.log(`[${SCRIPT_NAME}] No AI messages found. Initializing with default state.`);
                 await replaceVariables(_.cloneDeep(INITIAL_STATE));
@@ -461,12 +475,10 @@
         }
     };
     
-    // --- MODIFIED --- Simplified listener management
-    // We no longer need a separate `removeAllListeners` function for the hot-reload case.
-    // The cleanup logic at the top of the file handles that.
-
     const addAllListeners = () => {
         console.log(`[${SCRIPT_NAME}] Registering event listeners.`);
+        // NEW: Add generation_started listener
+        eventOn(tavern_events.GENERATION_STARTED, eventHandlers.handleGenerationStarted);
         eventOn(tavern_events.GENERATION_ENDED, eventHandlers.handleGenerationEnded);
         eventOn(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
         eventOn(tavern_events.MESSAGE_DELETED, eventHandlers.handleMessageDeleted);
@@ -477,8 +489,7 @@
     // --- MAIN EXECUTION ---
     $(() => {
         try {
-            console.log(`[${SCRIPT_NAME}] V2.1 loading. GLHF, player.`);
-            // --- MODIFIED ---
+            console.log(`[${SCRIPT_NAME}] V2.2 loading. GLHF, player.`);
             // The old listeners were already cleaned up. We just need to add the new ones.
             addAllListeners();
             // Store the newly created handlers on the window object for the *next* reload.
@@ -490,9 +501,6 @@
         }
     });
     
-    // --- MODIFIED ---
-    // This `unload` event is for when the user closes the tab or navigates away.
-    // We use the same cleanup function to be good citizens.
     $(window).on('unload', () => {
         cleanupListeners(window[HANDLER_STORAGE_KEY]);
     });
