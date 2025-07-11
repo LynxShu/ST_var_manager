@@ -1,4 +1,4 @@
-# Situational Awareness Manager (Unofficial)
+# Situational Awareness Manager Unofficial
 
 **Version:** 0.0.1 beta
 
@@ -17,7 +17,7 @@
 
 ## 指令参考 (Command Reference)
 
-指令需要被包裹在 `<...>` 符号中。
+指令需要被包裹在 `<...>` 符号中。建议给所有元素指定唯一`key`，指令对`key`强依赖。
 
 | Command | Syntax | Description |
 | :--- | :--- | :--- |
