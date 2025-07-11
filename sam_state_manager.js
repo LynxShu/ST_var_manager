@@ -23,8 +23,7 @@
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
 
-    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\s*::\s*(?<params>[\s\\S]*?)>/g;
-
+    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\s*::\s*(?<params>.*?)>/gs;
     const INITIAL_STATE = { static: {}, volatile: [], responseSummary: [], func: [] };
     let isProcessingState = false;
 
@@ -308,17 +307,18 @@
             const state = await getVariables();
             const promotedCommands = await processVolatileUpdates(state);
             const messageContent = lastAIMessage.mes;
-            
+
+            console.log(`[SAM] got message content: ${messageContent}`);
+            COMMAND_REGEX.lastIndex = 0; 
+
             let match;
             const newCommands = [];
             while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
                 newCommands.push({type: match.groups.type, params: match.groups.params});
             }
             
-            if (newCommands.length > 0) {
-                 console.log(`[SAM] ---- Found ${newCommands.length} command(s) to process ----`);
-            }
-
+            console.log(`[SAM] ---- Found ${newCommands.length} command(s) to process ----`);
+            
             const newState = await applyCommandsToState([...promotedCommands, ...newCommands], state); 
             
             await replaceVariables(goodCopy(newState));
@@ -331,6 +331,7 @@
         } catch (error) {
             console.error(`[${SCRIPT_NAME}] Error in processMessageState for index ${index}:`, error);
         } finally {
+            console.log("[SAM] update finished");
             isProcessingState = false;
         }
     }
@@ -354,7 +355,6 @@
                 await replaceVariables(goodCopy(lastKnownState));
             }
 
-            await reloadCurrentChat();
         } catch (e) {
             console.log(`[${SCRIPT_NAME}] Load state from message failed for index ${index}:`, e);
         }
@@ -397,7 +397,7 @@
                 } else {
                     // This is a new message generation. The state comes from the most recent AI message.
                     console.log(`[SAM] Detected new message. Finding latest state.`);
-                    sourceStateIndex = await findLastAiMessageAndIndex();
+                sourceStateIndex = await findLastAiMessageAndIndex();
                 }
 
                 if (sourceStateIndex !== -1) {
