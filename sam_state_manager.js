@@ -308,7 +308,7 @@
             const promotedCommands = await processVolatileUpdates(state);
             const messageContent = lastAIMessage.mes;
 
-            console.log(`[SAM] got message content: ${messageContent}`);
+            //console.log(`[SAM] got message content: ${messageContent}`);
             COMMAND_REGEX.lastIndex = 0; 
 
             let match;
@@ -327,7 +327,8 @@
             const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
             const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
             
-            await setChatMessage({message: finalContent}, index);
+            await setChatMessage({message: finalContent}, index, "display_current");
+
         } catch (error) {
             console.error(`[${SCRIPT_NAME}] Error in processMessageState for index ${index}:`, error);
         } finally {
@@ -389,15 +390,15 @@
                 const lastMessage = SillyTavern.chat[lastMessageIndex];
                 
                 let sourceStateIndex;
-                
-                if (lastMessage && lastMessage.is_user === false) {
+                // fixed logic.
+                if (lastMessage && (parseStateFromMessage(lastMessage.mes) != null)) {
                     // This is a swipe or regeneration. The state should come from the AI message BEFORE this one.
                     console.log(`[SAM] Detected swipe/regen. Finding state before index ${lastMessageIndex}.`);
                     sourceStateIndex = await findLastAiMessageAndIndex(lastMessageIndex);
                 } else {
                     // This is a new message generation. The state comes from the most recent AI message.
                     console.log(`[SAM] Detected new message. Finding latest state.`);
-                sourceStateIndex = await findLastAiMessageAndIndex();
+                    sourceStateIndex = await findLastAiMessageAndIndex();
                 }
 
                 if (sourceStateIndex !== -1) {
@@ -453,20 +454,11 @@
             }
         },
         handleMessageEdited: async () => {
-            console.log(`[${SCRIPT_NAME}] Message edited, reprocessing/reloading state.`);
+            console.log(`[${SCRIPT_NAME}] Message edited, reloading state.`);
             try {
-                // An edit might change commands, so we should re-process the message.
-                const lastAiIndex = await findLastAiMessageAndIndex();
+                const lastAiIndex = await findLastAiMessageAndIndex(-1);
                 if (lastAiIndex !== -1) {
-                    // Find the state from BEFORE the edited message to ensure a clean re-process.
-                    const stateSourceIndex = await findLastAiMessageAndIndex(lastAiIndex);
-                    if (stateSourceIndex !== -1) {
-                       await loadStateFromMessage(stateSourceIndex);
-                    } else {
-                       await replaceVariables(_.cloneDeep(INITIAL_STATE));
-                    }
-                    // Now process the edited message
-                    await processMessageState(lastAiIndex);
+                    await loadStateFromMessage(lastAiIndex);
                 }
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Error in MESSAGE_EDITED handler:`, error);
@@ -504,6 +496,11 @@
         eventOn(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
     };
 
+    const cleanListeners = () => {
+
+
+    }
+
     // --- MAIN EXECUTION ---
     $(() => {
         try {
@@ -518,9 +515,10 @@
             console.error(`[${SCRIPT_NAME}] Error during initialization:`, error);
         }
     });
-    
+
+    /** 
     $(window).on('unload', () => {
         cleanupListeners(window[HANDLER_STORAGE_KEY]);
     });
-
+*/
 })();
