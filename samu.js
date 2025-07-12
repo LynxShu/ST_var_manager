@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager Unofficial
-// == Version: 0.0.1 beta
+// == Version: 0.0.1
 // ==
 // == This project is a fork work of SAM v2.4.0 (Github.com/DefinitelyNotProcrastinating/ST_var_manager) 
 // == Originally Created By DefinitelyNotProcrastinating
@@ -12,6 +12,7 @@
 
 (function () {
     const SCRIPT_NAME = "Situational Awareness Manager Unofficial";
+    const DEBUG = false; // Set to true to enable detailed logging
     const STATE_BLOCK_START_MARKER = '<!--<|state|>';
     const STATE_BLOCK_END_MARKER = '</|state|>-->';
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
@@ -70,11 +71,11 @@
             if (message.is_user) continue;
             const state = parseStateFromMessage(message.mes);
             if (state) {
-                console.log(`[${SCRIPT_NAME}] Found latest state at index ${i}.`);
+                if (DEBUG) console.log(`[${SCRIPT_NAME}] Found latest state at index ${i}.`);
                 return _.cloneDeep(state);
             }
         }
-        console.log(`[${SCRIPT_NAME}] No previous state found. Using initial state.`);
+        if (DEBUG) console.log(`[${SCRIPT_NAME}] No previous state found. Using initial state.`);
         return _.cloneDeep(INITIAL_STATE);
     }
 
@@ -87,6 +88,19 @@
         return -1;
     }
 
+    /**
+     * Executes a user-defined function in a sandboxed environment.
+     * 
+     * Security Measures:
+     * - **Strict Mode**: Code runs in 'use strict' mode.
+     * - **Isolated Scope**: The function does not have access to the closure of this script.
+     * - **Controlled Globals**: Only provides safe globals like `state`, `_` (lodash), and controlled `fetch`/`XMLHttpRequest`.
+     * - **Network Control**: Network access via `fetch` and `XMLHttpRequest` is disabled by default and can be enabled per-function.
+     * - **Timeout**: Each function has a configurable execution timeout to prevent long-running scripts.
+     * 
+     * While this provides a reasonable level of security for the intended use case, it is not a perfect, foolproof sandbox.
+     * For maximum security, a Web Worker would offer stronger isolation, but with increased complexity.
+     */
     async function runSandboxedFunction(funcName, params, state) {
         const funcDef = state.func?.find(f => f.func_name === funcName);
 
@@ -125,7 +139,7 @@
 
         try {
             const result = await Promise.race([executionPromise, timeoutPromise]);
-            console.log(`[${SCRIPT_NAME}] EVAL: Function '${funcName}' executed successfully.`, { result });
+            if (DEBUG) console.log(`[${SCRIPT_NAME}] EVAL: Function '${funcName}' executed successfully.`, { result });
         } catch (error) {
             console.error(`[${SCRIPT_NAME}] EVAL: Error executing function '${funcName}'.`, error);
         }
@@ -137,136 +151,130 @@
         const remainingVolatiles = [];
         const currentRound = await getRoundCounter();
         const currentTime = new Date();
-        for (const volatile of state.volatile) {
-            const [varName, varValue, isGameTime, targetTime] = volatile;
-            let triggered = isGameTime ? (currentTime >= new Date(targetTime)) : (currentRound >= targetTime);
+        for (const entry of state.volatile) {
+            let triggered = entry.isRealTime 
+                ? (currentTime >= new Date(entry.triggerAt)) 
+                : (currentRound >= entry.triggerAt);
+
             if (triggered) {
-                promotedCommands.push({ type: 'SET', preparsed: true, params: [varName, varValue] });
+                promotedCommands.push({ type: 'SET', preparsed: true, params: [entry.path, entry.value] });
             } else {
-                remainingVolatiles.push(volatile);
+                remainingVolatiles.push(entry);
             }
         }
         state.volatile = remainingVolatiles;
         return promotedCommands;
     }
 
-    async function applyCommandsToState(commands, state) {
-        const currentRound = await getRoundCounter();
-        for (const command of commands) {
-            let params;
-            if (command.preparsed) {
-                params = command.params;
+    const commandHandlers = {
+        'SET': (params, state, isPreparsed) => {
+            let [path, value] = params;
+            if (!path || value === undefined) return;
+            const finalValue = isPreparsed ? value : parseDynamicValue(value);
+            _.set(state.static, path, finalValue);
+        },
+        'ADD': (params, state) => {
+            const [path, valueStr] = params;
+            if (!path || valueStr === undefined) return;
+
+            const target = _.get(state.static, path);
+            const valueToAdd = tryParseJSON(valueStr);
+
+            if (Array.isArray(target)) {
+                if (typeof valueToAdd === 'object' && valueToAdd !== null && valueToAdd.key && typeof valueToAdd.count === 'number') {
+                    const existingItem = target.find(item => item && item.key === valueToAdd.key);
+                    if (existingItem) {
+                        existingItem.count = (typeof existingItem.count === 'number' ? existingItem.count : 0) + valueToAdd.count;
+                    } else {
+                        target.push(valueToAdd);
+                    }
+                } else {
+                    target.push(valueToAdd);
+                }
             } else {
-                params = command.params.split('::').map(p => p.trim());
+                const increment = Number(valueStr);
+                const baseValue = Number(target) || 0;
+                if (!isNaN(increment) && !isNaN(baseValue)) {
+                    _.set(state.static, path, baseValue + increment);
+                }
             }
+        },
+        'RESPONSE_SUMMARY': (params, state) => {
+            if (!Array.isArray(state.responseSummary)) {
+                state.responseSummary = state.responseSummary ? [state.responseSummary] : [];
+            }
+            const summary = Array.isArray(params) ? params.join('::') : params;
+            if (!state.responseSummary.includes(summary.trim())) {
+                state.responseSummary.push(summary.trim());
+            }
+        },
+        'TIMED_SET': async (params, state) => {
+            const [path, value, reason, isRealTimeStr, timeUnitsStr] = params;
+            if (!path || value === undefined || !reason || !isRealTimeStr || !timeUnitsStr) return;
             
+            const isRealTime = isRealTimeStr.toLowerCase() === 'true';
+            const finalValue = parseDynamicValue(value);
+            const currentRound = await getRoundCounter();
+            const triggerAt = isRealTime ? new Date(timeUnitsStr).toISOString() : currentRound + Number(timeUnitsStr);
+
+            if (!state.volatile) state.volatile = [];
+            state.volatile.push({ path, value: finalValue, isRealTime, triggerAt, reason });
+        },
+        'CANCEL_SET': (params, state) => {
+            if (!params[0] || !state.volatile?.length) return;
+            const reason = params[0];
+            state.volatile = state.volatile.filter(entry => entry.reason !== reason);
+        },
+        'DEL': (params, state) => {
+            const [listPath, indexStr] = params;
+            if (!listPath || indexStr === undefined) return;
+            const index = parseInt(indexStr, 10);
+            if (isNaN(index)) return;
+            const list = _.get(state.static, listPath);
+            if (Array.isArray(list) && index >= 0 && index < list.length) {
+                list.splice(index, 1);
+            }
+        },
+        'REMOVE': (params, state) => {
+            const [listPath, identifier, targetId, countStr] = params;
+            if (!listPath || !identifier || targetId === undefined) return;
+            
+            const list = _.get(state.static, listPath);
+            if (!Array.isArray(list)) return;
+            
+            const parsedTargetId = tryParseJSON(targetId);
+            const maxToRemove = parseInt(countStr, 10);
+
+            if (isNaN(maxToRemove) || maxToRemove <= 0) {
+                _.set(state.static, listPath, _.reject(list, { [identifier]: parsedTargetId }));
+            } else {
+                let removedCount = 0;
+                _.set(state.static, listPath, list.filter(item => {
+                    if (removedCount < maxToRemove && item && item[identifier] === parsedTargetId) {
+                        removedCount++;
+                        return false;
+                    }
+                    return true;
+                }));
+            }
+        },
+        'EVAL': async (params, state) => {
+            const [funcName, ...funcParams] = params;
+            if (!funcName) {
+                console.warn(`[${SCRIPT_NAME}] EVAL aborted: EVAL command requires a function name.`);
+                return;
+            }
+            await runSandboxedFunction(funcName, funcParams, state);
+        }
+    };
+
+    async function applyCommandsToState(commands, state) {
+        for (const command of commands) {
             try {
-                switch (command.type) {
-                    case 'SET': {
-                        let [varName, varValue] = params;
-                        if (!varName || varValue === undefined) continue;
-                        
-                        const finalValue = command.preparsed ? varValue : parseDynamicValue(varValue);
-                        _.set(state.static, varName, finalValue);
-                        break;
-                    }
-                    case 'ADD': {
-                        const [varName, valueStr] = params;
-                        if (!varName || valueStr === undefined) continue;
-
-                        const targetList = _.get(state.static, varName);
-                        const valueToAdd = tryParseJSON(valueStr);
-
-                        if (Array.isArray(targetList)) {
-                            if (typeof valueToAdd === 'object' && valueToAdd !== null && valueToAdd.key && typeof valueToAdd.count === 'number') {
-                                const existingItem = targetList.find(item => item && item.key === valueToAdd.key);
-                                
-                                if (existingItem) {
-                                    if (typeof existingItem.count === 'number') existingItem.count += valueToAdd.count;
-                                    else existingItem.count = valueToAdd.count;
-                                } else {
-                                    targetList.push(valueToAdd);
-                                }
-                            } else {
-                                targetList.push(valueToAdd);
-                            }
-                        } else {
-                            const increment = Number(valueStr);
-                            const baseValue = Number(targetList) || 0;
-                            if (isNaN(increment) || isNaN(baseValue)) continue;
-                            _.set(state.static, varName, baseValue + increment);
-                        }
-                        break;
-                    }
-                    case 'RESPONSE_SUMMARY': {
-                        if (!Array.isArray(state.responseSummary)) state.responseSummary = state.responseSummary ? [state.responseSummary] : [];
-                        if (!state.responseSummary.includes(command.params.trim())) state.responseSummary.push(command.params.trim());
-                        break;
-                    }
-                    case 'TIMED_SET': {
-                        const [varName, varValue, reason, isGameTimeStr, timeUnitsStr] = params;
-                        if (!varName || varValue === undefined || !reason || !isGameTimeStr || !timeUnitsStr) continue;
-                        const isGameTime = isGameTimeStr.toLowerCase() === 'true';
-                        const finalValue = parseDynamicValue(varValue);
-                        const targetTime = isGameTime ? new Date(timeUnitsStr).toISOString() : currentRound + Number(timeUnitsStr);
-                        if(!state.volatile) state.volatile = [];
-                        state.volatile.push([varName, finalValue, isGameTime, targetTime, reason]);
-                        break;
-                    }
-                    case 'CANCEL_SET': {
-                        if (!params[0] || !state.volatile?.length) continue;
-                        const identifier = params[0];
-                        state.volatile = state.volatile.filter(entry => entry[4] !== identifier);
-                        break;
-                    }
-                    case 'DEL': {
-                        const [listPath, indexStr] = params;
-                        if (!listPath || indexStr === undefined) continue;
-                        const index = parseInt(indexStr, 10);
-                        if (isNaN(index)) continue;
-                        const list = _.get(state.static, listPath);
-                        if (!Array.isArray(list)) continue;
-                        if (index >= 0 && index < list.length) {
-                            list.splice(index, 1);
-                        }
-                        break;
-                    }
-                    case 'REMOVE': {
-                        const [listPath, identifier, targetId, countStr] = params;
-                        if (!listPath || !identifier || targetId === undefined) continue;
-                        
-                        const list = _.get(state.static, listPath);
-                        if (!Array.isArray(list)) continue;
-                        
-                        const parsedTargetId = tryParseJSON(targetId);
-                        const maxToRemove = parseInt(countStr, 10);
-
-                        if (isNaN(maxToRemove) || maxToRemove <= 0) {
-                            _.set(state.static, listPath, _.reject(list, {[identifier]: parsedTargetId}));
-                        } 
-                        else {
-                            let removedCount = 0;
-                            const updatedList = [];
-                            for (const item of list) {
-                                if (removedCount < maxToRemove && item && item[identifier] === parsedTargetId) {
-                                    removedCount++;
-                                } else {
-                                    updatedList.push(item);
-                                }
-                            }
-                            _.set(state.static, listPath, updatedList);
-                        }
-                        break;
-                    }
-                    case 'EVAL': {
-                        const [funcName, ...funcParams] = params;
-                        if (!funcName) {
-                            console.warn(`[${SCRIPT_NAME}] EVAL aborted: EVAL command requires a function name.`);
-                            continue;
-                        }
-                        await runSandboxedFunction(funcName, funcParams, state);
-                        break;
-                    }
+                const handler = commandHandlers[command.type];
+                if (handler) {
+                    const params = command.preparsed ? command.params : command.params.split('::').map(p => p.trim());
+                    await handler(params, state, command.preparsed);
                 }
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Error processing command: ${JSON.stringify(command)}`, error);
@@ -282,14 +290,11 @@
         context: {},
         transitions: {
             IDLE: {
-                startGeneration: 'PREPARING',
+                startGeneration: 'GENERATING',
                 swipeMessage: 'PROCESSING',
                 editMessage: 'PROCESSING',
                 deleteMessage: 'RELOADING',
                 changeChat: 'RELOADING'
-            },
-            PREPARING: {
-                preparationComplete: 'GENERATING'
             },
             GENERATING: {
                 generationEnded: 'PROCESSING'
@@ -320,12 +325,12 @@
 
             const validTransition = this.transitions[this.currentState]?.[action];
             if (!validTransition) {
-                console.log(`[${SCRIPT_NAME}] Invalid action '${action}' for state '${this.currentState}'. Ignoring.`);
+                if (DEBUG) console.log(`[${SCRIPT_NAME}] Invalid action '${action}' for state '${this.currentState}'. Ignoring.`);
                 await this._processQueue();
                 return;
             }
 
-            console.log(`[${SCRIPT_NAME}] Transition: ${this.currentState} -> ${validTransition} (Action: ${action})`);
+            if (DEBUG) console.log(`[${SCRIPT_NAME}] Transition: ${this.currentState} -> ${validTransition} (Action: ${action})`);
             this.currentState = validTransition;
             this.context = { ...this.context, ...data };
 
@@ -341,7 +346,7 @@
 
         async onStateEnter(newState) {
             switch (newState) {
-                case 'PREPARING': {
+                case 'GENERATING': {
                     const lastMessageIndex = SillyTavern.chat.length - 1;
                     const lastMessage = SillyTavern.chat[lastMessageIndex];
                     let sourceStateIndex;
@@ -350,10 +355,10 @@
                     } else {
                         sourceStateIndex = await findLastAiMessageAndIndex();
                     }
-                    
+
                     const stateToLoad = (sourceStateIndex !== -1) ? await findLatestState(SillyTavern.chat, sourceStateIndex) : _.cloneDeep(INITIAL_STATE);
                     await replaceVariables(stateToLoad);
-                    await this.dispatch('preparationComplete');
+                    // No dispatch needed, we now wait for the 'generationEnded' event.
                     break;
                 }
                 case 'PROCESSING': {
@@ -417,9 +422,13 @@
         handleMessageDeleted: async () => {
             fsm.dispatch('deleteMessage');
         },
-        handleMessageEdited: async () => {
-             const lastAiIndex = await findLastAiMessageAndIndex();
-            fsm.dispatch('editMessage', { messageIndex: lastAiIndex });
+        handleMessageEdited: async (message, index) => {
+            if (!message || message.is_user) {
+                if (DEBUG) console.log(`[${SCRIPT_NAME}] Ignoring user message edit.`);
+                return;
+            }
+            // The index is provided by the event, so we can use it directly.
+            fsm.dispatch('editMessage', { messageIndex: index });
         },
         handleChatChanged: async () => {
             fsm.dispatch('changeChat');
@@ -429,7 +438,7 @@
     const cleanupPreviousListeners = () => {
          if (window[HANDLER_STORAGE_KEY]) {
             const handlers = window[HANDLER_STORAGE_KEY];
-            console.log(`[${SCRIPT_NAME}] Removing listeners from a previous instance.`);
+            if (DEBUG) console.log(`[${SCRIPT_NAME}] Removing listeners from a previous instance.`);
             eventRemoveListener(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
             eventRemoveListener(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
             eventRemoveListener(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
@@ -440,7 +449,7 @@
     };
 
     const addAllListeners = () => {
-        console.log(`[${SCRIPT_NAME}] Registering FSM event listeners.`);
+        if (DEBUG) console.log(`[${SCRIPT_NAME}] Registering FSM event listeners.`);
         eventOn(tavern_events.GENERATION_STARTED, eventHandlers.handleGenerationStarted);
         eventOn(tavern_events.GENERATION_ENDED, eventHandlers.handleGenerationEnded);
         eventOn(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
@@ -451,7 +460,7 @@
 
     $(() => {
         try {
-            console.log(`[${SCRIPT_NAME}] Initializing.`);
+            if (DEBUG) console.log(`[${SCRIPT_NAME}] Initializing.`);
             cleanupPreviousListeners();
             addAllListeners();
             window[HANDLER_STORAGE_KEY] = eventHandlers;
