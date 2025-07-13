@@ -28,6 +28,7 @@
     let curr_state = STATES.IDLE;
     const event_queue = [];
     let isDispatching = false;
+    let isProcessingState = false;
     async function getRoundCounter() { return SillyTavern.chat.length - 1; }
     function tryParseJSON(str) { try { return JSON.parse(str); } catch (e) { return str; } }
     function goodCopy(state) { return _.cloneDeep(state) ?? _.cloneDeep(INITIAL_STATE); }
@@ -175,15 +176,14 @@
             }
             const increment = Number(valueStr);
             if (!isNaN(increment)) {
-                 if (typeof target === 'number' || target === undefined) {
+                if (typeof target === 'number' || target === undefined) {
                     const baseValue = Number(target) || 0;
                     _.set(state.static, path, baseValue + increment);
                     return;
                 }
             }
-            if (DEBUG) {
-                console.warn(`[${SCRIPT_NAME}] ADD command aborted: Target at "${path}" is not an Array or a Number. Its type is "${typeof target}". Received value:`, valueToAdd);
-            }
+            // This is a warning, not a debug message, as it indicates a potential logic error in the user's commands.
+            console.warn(`[${SCRIPT_NAME}] ADD command aborted: Target at "${path}" is not an Array or a Number. Its type is "${typeof target}". Received value:`, valueToAdd);
         },
         'RESPONSE_SUMMARY': (params, state) => {
             if (!Array.isArray(state.responseSummary)) {
@@ -302,14 +302,27 @@
         return state;
     }
     async function processMessageState(index) {
+        if (isProcessingState) {
+            console.warn(`[${SCRIPT_NAME}] Aborting processMessageState: Already processing.`);
+            return;
+        }
+        isProcessingState = true;
         if (DEBUG) console.log(`[${SCRIPT_NAME}] processing message state at ${index}`);
         try {
             if (index === "{{lastMessageId}}"){
                 index = SillyTavern.chat.length - 1;
             }
             const lastAIMessage = SillyTavern.chat[index];
-            if (!lastAIMessage || lastAIMessage.is_user) return;
-            const state = await getVariables();
+            if (!lastAIMessage || lastAIMessage.is_user) {
+                isProcessingState = false;
+                return;
+            }
+            var state = await getVariables();
+            if (state && state.SAM_data) {
+                state = state.SAM_data;
+            } else {
+                state = _.cloneDeep(INITIAL_STATE);
+            }
             const promotedCommands = await processVolatileUpdates(state);
             const messageContent = lastAIMessage.mes;
             COMMAND_REGEX.lastIndex = 0;
@@ -320,13 +333,15 @@
             }
             if (DEBUG) console.log(`[${SCRIPT_NAME}] ---- Found ${newCommands.length} command(s) to process ----`);
             const newState = await applyCommandsToState([...promotedCommands, ...newCommands], state);
-            await replaceVariables(goodCopy(newState));
+            await insertOrAssignVariables({"SAM_data": goodCopy(newState)});
             const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
             const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
             const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
             await setChatMessage({message: finalContent}, index, "display_current");
         } catch (error) {
             console.error(`[${SCRIPT_NAME}] Error in processMessageState for index ${index}:`, error);
+        } finally {
+            isProcessingState = false;
         }
     }
     async function loadStateFromMessage(index) {
@@ -339,11 +354,11 @@
             const state = parseStateFromMessage(message.mes);
             if (state) {
                 if (DEBUG) console.log(`[${SCRIPT_NAME}] replacing variables with found state at index ${index}`);
-                await replaceVariables(goodCopy(state));
+                await insertOrAssignVariables({"SAM_data": goodCopy(state)});
             } else {
                 if (DEBUG) console.log(`[${SCRIPT_NAME}] did not find valid state at index, replacing with latest state`)
                 const lastKnownState = await findLatestState(SillyTavern.chat, index);
-                await replaceVariables(goodCopy(lastKnownState));
+                await insertOrAssignVariables({"SAM_data": goodCopy(lastKnownState)});
             }
         } catch (e) {
             console.error(`[${SCRIPT_NAME}] Load state from message failed for index ${index}:`, e);
@@ -354,7 +369,7 @@
         if (lastAIMessageIdx !== -1) {
             await loadStateFromMessage(lastAIMessageIdx);
         } else {
-            await replaceVariables(_.cloneDeep(INITIAL_STATE));
+            await insertOrAssignVariables({"SAM_data": _.cloneDeep(INITIAL_STATE)});
         }
     }
     async function dispatcher(event, ...event_params){
