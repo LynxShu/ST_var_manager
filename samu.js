@@ -1,14 +1,12 @@
 // ============================================================================
 // == Situational Awareness Manager Unofficial
-// == Version: 0.0.2 beta
+// == Version: 0.0.3 beta
 // ==
 // == Current Maintainer: LynxShu (Github.com/LynxShu/ST_var_manager)
-// ==
-// == This project is a fork work of SAM v2.4.0 (Github.com/DefinitelyNotProcrastinating/ST_var_manager) 
+// == This project is a fork work of SAM (Github.com/DefinitelyNotProcrastinating/ST_var_manager) 
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
 // == functions, ensuring proper variable display and structure.
-// == 
 // ============================================================================
 
 (function () {
@@ -143,7 +141,20 @@
             const [varName, varValue, isGameTime, targetTime] = volatile;
             let triggered = isGameTime ? (currentTime >= new Date(targetTime)) : (currentRound >= targetTime);
             if (triggered) {
-                promotedCommands.push({ type: 'SET', params: `${varName} :: ${varValue}` });
+                // Smart TIMED_SET logic: Determine if it's a SET or REMOVE operation.
+                if (varValue === null) {
+                    // This is an object removal request.
+                    // The path points to the object to be removed, e.g., "character.player.splst.buff_strength".
+                    const pathParts = varName.split('.');
+                    const keyToRemove = pathParts.pop();
+                    const listPath = pathParts.join('.');
+                    // We construct a REMOVE command to remove the object with the matching key from the list.
+                    // The '0' means remove all matching instances, which is safer for this operation.
+                    promotedCommands.push({ type: 'REMOVE', params: `${listPath}::key::${keyToRemove}::0` });
+                } else {
+                    // This is a standard value-setting request.
+                    promotedCommands.push({ type: 'SET', params: `${varName}::${varValue}` });
+                }
             } else {
                 remainingVolatiles.push(volatile);
             }
@@ -158,22 +169,41 @@
             const finalValue = isPreparsed ? value : parseDynamicValue(value);
             _.set(state.static, path, finalValue);
         },
-        'ADD': (params, state) => {
+        'ADD': (params, state, isPreparsed, context) => {
             let [path, valueStr] = params;
             if (!path || valueStr === undefined) return;
+            
             const target = _.get(state.static, path);
             const valueToAdd = tryParseJSON(valueStr);
+
             if (Array.isArray(target)) {
-                if (typeof valueToAdd === 'object' && valueToAdd !== null && 'key' in valueToAdd && 'count' in valueToAdd) {
-                    const existingItem = target.find(item => typeof item === 'object' && item.key === valueToAdd.key);
-                    if (existingItem && typeof existingItem.count === 'number') {
-                        existingItem.count += valueToAdd.count;
-                        return;
+                context.modifiedListPaths.add(path);
+                
+                if (typeof valueToAdd === 'object' && valueToAdd !== null && 'key' in valueToAdd && typeof valueToAdd.count === 'number') {
+                    const itemsToMerge = _.filter(target, item => 
+                        typeof item === 'object' && item !== null && item.key === valueToAdd.key && typeof item.count === 'number'
+                    );
+                    
+                    const totalCount = valueToAdd.count + _.sumBy(itemsToMerge, 'count');
+                    
+                    if (itemsToMerge.length > 0) {
+                        _.remove(target, item => typeof item === 'object' && item !== null && item.key === valueToAdd.key);
                     }
+
+                    // Use a template from the item being added or an existing item to preserve other properties
+                    const template = itemsToMerge.length > 0 ? itemsToMerge[0] : valueToAdd;
+                    const mergedItem = _.cloneDeep(template);
+                    mergedItem.count = totalCount;
+                    
+                    target.push(mergedItem);
+
+                } else {
+                    target.push(valueToAdd);
                 }
-                target.push(valueToAdd);
                 return;
             }
+
+            // Handle Numeric Addition
             const increment = Number(valueStr);
             if (!isNaN(increment)) {
                 if (typeof target === 'number' || target === undefined) {
@@ -182,7 +212,7 @@
                     return;
                 }
             }
-            // This is a warning, not a debug message, as it indicates a potential logic error in the user's commands.
+
             console.warn(`[${SCRIPT_NAME}] ADD command aborted: Target at "${path}" is not an Array or a Number. Its type is "${typeof target}". Received value:`, valueToAdd);
         },
         'RESPONSE_SUMMARY': (params, state) => {
@@ -196,9 +226,17 @@
         },
         'TIMED_SET': async (params, state) => {
             const [varName, varValue, reason, isGameTimeStr, timeUnitsStr] = params;
-            if (!varName || !varValue || !reason || !isGameTimeStr || !timeUnitsStr) return;
-            const isGameTime = isGameTimeStr.toLowerCase() === 'true' || isGameTimeStr === 1;
-            const finalValue = isNaN(varValue) ? tryParseJSON(varValue) : Number(varValue);
+            if (!varName || varValue === undefined || !reason || !isGameTimeStr || !timeUnitsStr) return;
+            const isGameTime = isGameTimeStr.toLowerCase() === 'true' || isGameTimeStr === '1';
+
+            // Correctly parse the value, preserving `null` for object removal signals.
+            let finalValue;
+            if (varValue === null || varValue.trim().toLowerCase() === 'null') {
+                finalValue = null;
+            } else {
+                finalValue = parseDynamicValue(varValue);
+            }
+
             const currentRound = await getRoundCounter();
             const targetTime = isGameTime ? new Date(timeUnitsStr).toISOString() : currentRound + Number(timeUnitsStr);
             if(!state.volatile) state.volatile = [];
@@ -234,32 +272,34 @@
                 return;
             }
             const parsedTargetId = tryParseJSON(targetId);
-            let itemsRemoved = false;
             const initialLength = list.length;
-            const targetItem = list.find(item => _.get(item, identifier) === parsedTargetId);
-            if (targetItem && typeof targetItem === 'object' && 'count' in targetItem && typeof targetItem.count === 'number') {
-                if (count === 0 || targetItem.count <= count) {
-                    _.remove(list, item => _.get(item, identifier) === parsedTargetId);
-                } else {
-                    targetItem.count -= count;
-                }
-            } else {
-                let removedCounter = 0;
-                _.remove(list, item => {
-                    if (_.get(item, identifier) === parsedTargetId) {
-                        if (count === 0) return true;
-                        if (removedCounter < count) {
-                            removedCounter++;
+            
+            let totalRemoved = 0;
+            const toRemove = count === 0 ? Infinity : count;
+
+            _.remove(list, item => {
+                if (totalRemoved >= toRemove) return false;
+
+                if (_.get(item, identifier) === parsedTargetId) {
+                    if (typeof item === 'object' && item !== null && 'count' in item && typeof item.count === 'number') {
+                        const canRemoveFromThisStack = toRemove - totalRemoved;
+                        if (item.count > canRemoveFromThisStack) {
+                            item.count -= canRemoveFromThisStack;
+                            totalRemoved = toRemove;
+                            return false;
+                        } else {
+                            totalRemoved += item.count;
                             return true;
                         }
+                    } else {
+                        totalRemoved++;
+                        return true;
                     }
-                    return false;
-                });
-            }
+                }
+                return false;
+            });
+
             if (list.length < initialLength) {
-                itemsRemoved = true;
-            }
-            if (itemsRemoved) {
                 context.modifiedListPaths.add(listPath);
             }
         },
@@ -295,9 +335,39 @@
                 console.error(`[${SCRIPT_NAME}] Error processing command: ${JSON.stringify(command)}`, error);
             }
         }
-        for (const path of context.modifiedListPaths){
+        for (const path of context.modifiedListPaths) {
             const list = _.get(state.static, path);
-            if(Array.isArray(list)) _.remove(list, (item) => item === undefined);
+            if (Array.isArray(list)) {
+                // Step 1: Compact the array to remove empty slots from DEL operations.
+                _.remove(list, (item) => item === undefined);
+
+                // Step 2: Merge stackable items.
+                // An item is considered stackable if it's an object with a 'key' and a numeric 'count'.
+                const stackableItems = list.filter(item => 
+                    typeof item === 'object' && item !== null && item.key !== undefined && typeof item.count === 'number'
+                );
+                const nonStackableItems = list.filter(item => 
+                    !(typeof item === 'object' && item !== null && item.key !== undefined && typeof item.count === 'number')
+                );
+
+                if (stackableItems.length > 0) {
+                    const grouped = _.groupBy(stackableItems, 'key');
+                    const mergedStackableItems = Object.values(grouped).map(group => {
+                        if (group.length === 1) {
+                            return group[0];
+                        }
+                        const totalCount = _.sumBy(group, 'count');
+                        // Use the first item as a template for the merged item.
+                        const mergedItem = _.cloneDeep(group[0]);
+                        mergedItem.count = totalCount;
+                        return mergedItem;
+                    });
+                    
+                    // Replace the original list content with the new, sanitized list.
+                    list.length = 0; 
+                    Array.prototype.push.apply(list, [...nonStackableItems, ...mergedStackableItems]);
+                }
+            }
         }
         return state;
     }
