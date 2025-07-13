@@ -1,8 +1,6 @@
 # 🌟 Situational Awareness Manager Unofficial
 
-**当前版本:** 0.0.2 beta  /  **维护者:** [LynxShu 的个人分享仓库](github.com/LynxShu/lynxshu.share)
-
-
+**当前版本:** 0.0.2 (beta) / [LynxShu 的个人分享仓库](github.com/LynxShu/lynxshu.share)
 
 ## 📄 核心理念与声明 (Core Concept & Disclaimer)
 
@@ -10,35 +8,17 @@
 
 *   **原始项目 (SAM):** [github.com/DefinitelyNotProcrastinating/ST_var_manager](https://github.com/DefinitelyNotProcrastinating/ST_var_manager)
 *   **原作者 (Originally Created By):** DefinitelyNotProcrastinating
-*   **所有核心概念和基础架构均归功于原作者** 
+*   **所有核心概念和基础架构均归功于原作者**
 
 SAMU 的诞生并非为了改进或增强原版 SAM ，而是为了**适配一套特定的、基于世界书（WI）的通用角色卡框架**。在这个框架下，AI 可以根据**预设的全套提示词**自动生成所有世界书条目和初始状态及动态 UI 。
-
-为此，SAMU 对原版代码进行了**针对性**的修改，以实现更符合这套体系的状态管理。
 
 ### ⚠️ 重要提示
 
 如果您的需求是构建一个高度定制化、独立的游戏系统，或者您需要将 SAM 与其他复杂的 JS 脚本一同使用，我们**强烈推荐您使用原版 SAM** ，因为它提供了更强的健壮性和数据隔离性。SAMU 更专注于在我们的特定框架内提供无缝的开箱即用体验。
 
-## ⚙️ 核心修改 (Key Modifications)
+## ⚙️ 数据结构与路径 (Data Structure & Paths)
 
-为了适配我们的框架，SAMU 做了以下两个核心修改：
-
-1.  **增强的指令逻辑**:
-    *   重写了 `ADD` 和 `REMOVE` 指令，以支持**可堆叠物品/状态**的精细管理（例如，增加/减少物品数量，而不是直接添加/删除整个对象）。这是SAMU与原版最核心的功能区别。
-
-2.  **简化的数据结构**:
-    *   移除了原版中的 `SAM_data` 命名空间。所有状态数据都直接存储在顶层的 `variables` 对象中。
-    *   **优点**: 这使得SAMU可以和通用的、直接读取 `variables` 的UI模板（如此框架中使用的）无缝对接，无需修改UI代码。
-    *   **潜在风险**: 牺牲了一部分数据隔离性。请确保没有其他脚本会意外修改 SAMU 管理的状态数据。
-
-## 🔢 数据结构与路径 (Data Structure & Paths)
-
-**注意**: 以下内容是为适配我们的“通用角色卡自动构建提示词”而设计的**推荐结构**，并非强制要求。用户可以根据自己的需求进行调整，但需注意 `ADD` 和 `REMOVE` 指令的特殊逻辑是为处理含有 `key` 和 `count` 属性的对象而优化的。
-
-SAMU 的指令集是围绕一个特定的 `state` 对象结构设计的。为了正确使用 `ADD` 和 `REMOVE` 等指令，了解此结构至关重要。
-
----
+**重要提示**: 所有状态路径都位于 `SAM_data` 对象下。在 UI 或脚本中引用时，请确保添加 `SAM_data.` 前缀。例如：`{{SAM_data.character.player.name}}`。
 
 ### **数据类型定义 (Type Definitions)**
 
@@ -56,9 +36,6 @@ SAMU 的指令集是围绕一个特定的 `state` 对象结构设计的。为了
     *   *必须字段*: `{key, name, type, required, value}`
 *   **`combat`**: 特殊统计类型,如战斗力、角色实力。
     *   *必须字段*: `{key, name, type, value}`
-*   **`func`**: 可执行函数,用于高级逻辑。
-    *   *必须字段*: `{func_name, func_body}`
-    *   *可选字段*: `{func_params, timeout, network_access}`
 
 ---
 
@@ -84,6 +61,8 @@ SAMU 的指令集是围绕一个特定的 `state` 对象结构设计的。为了
 ## ⌨️ 指令参考 (Command Reference)
 
 所有指令都需要被包裹在 `<...>` 符号中。
+
+**注意**: 指令内部的路径 **不应** 包含 `SAM_data.` 前缀。指令会自动在 `SAM_data` 内部进行操作。
 
 ### **核心指令**
 
