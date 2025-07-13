@@ -6,6 +6,8 @@ Situational Awareness Manager Unofficial
 
 - 正在重构 `Type Definitions` 和 `预置函数库`，不慌不慌... 我一直在纠结这个`EVAL`要不要写进`预置提示词`，但是真他娘的好用啊！！！所以我打算先搞一套`预置函数库`。
 
+- 让我们为伟大的 @DefinitelyNotProcrastinating 献上膝盖！
+
 
 ## 📄 核心理念与声明 (Core Concept & Disclaimer)
 
@@ -13,7 +15,8 @@ Situational Awareness Manager Unofficial
 
 *   **原始项目 (SAM):** [DefinitelyNotProcrastinating/ST_var_manager](https://github.com/DefinitelyNotProcrastinating/ST_var_manager)
 *   **原作者 (Originally Created By):** DefinitelyNotProcrastinating
-*   **所有核心概念和基础架构均归功于原作者**
+*   **所有核心概念和架构均归功于原作者**
+*   **而且💩菜💩菜的我经常在合并官方的优秀机制**
 
 SAMU 的诞生并非为了改进或增强原版 SAM ，~~因为我非常的菜~~ 而是为了**适配一套特定的、基于世界书（WI）的通用角色卡框架**。在这个框架下，AI 可以根据**预设的全套提示词**自动生成所有世界书条目和初始状态及动态 UI 。
 
