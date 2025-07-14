@@ -2,9 +2,9 @@
 
 Situational Awareness Manager Unofficial
 
-- **当前版本:** 0.0.3 (beta) / **项目地址:** [LynxShu/st_samu](https://github.com/LynxShu/st_samu)
+- **当前版本:** 0.4 beta / **项目地址:** [LynxShu/st_samu](https://github.com/LynxShu/st_samu)
 
-- 正在重构 `Type Definitions` 和 `预置函数库`，不慌不慌... 我一直在纠结这个`EVAL`要不要写进`预置提示词`，但是真他娘的好用啊！！！所以我打算先搞一套`预置函数库`。
+- 我一直在纠结这个`EVAL`要不要写进`预置提示词`，但是真他娘的好用啊！！！所以我打算先搞一套`预置函数库`，让AI也能调用代码，岂不美哉？
 
 - 让我们为伟大的 @DefinitelyNotProcrastinating 献上膝盖！
 
@@ -28,31 +28,34 @@ SAMU 的诞生并非为了改进或增强原版 SAM ，~~因为我非常的菜~~
 
 **重要提示**: 所有状态路径都位于 `SAM_data` 对象下。在 UI 或脚本中引用时，请确保添加 `SAM_data.` 前缀。例如：`{{SAM_data.character.player.name}}`。
 
-正在重构......为了防止 AI 混淆指令，我打算重构类型定义，让 AI 无脑按格式加载命令... 
-
-<del>
 ### **数据类型定义 (Type Definitions)**
 
-这是在我们的框架中使用的标准数据对象类型。在使用 `ADD` 指令添加新元素时，应尽量保持字段完整。
+**正在重构......为了防止 AI 混淆指令，我打算重构类型定义，让 AI 无脑按格式加载命令...**
+
+<del>
+
+这是在我们的框架中推荐使用的标准数据对象类型。在使用 `ADD` 指令添加新元素时，应尽量保持字段完整，以确保AI能够正确理解和操作。
 
 *   **`char`**: 游戏角色。
-    *   *必须字段*: `{key, name, type, gender, summary}`
+    *   *推荐字段*: `{key, name, type, gender, summary}`
 *   **`item`**: 游戏物品。
-    *   *必须字段*: `{key, name, type, desc, count}`
+    *   *推荐字段*: `{key, name, type, desc, count}`
 *   **`state`**: 简单状态,如生物的属性、身体状态。
-    *   *必须字段*: `{key, name, type, value}`
+    *   *推荐字段*: `{key, name, type, value}`
 *   **`leveled`**: 可成长项,如技能、特殊状态。
-    *   *必须字段*: `{key, name, type, current_exp, current_level}`
+    *   *推荐字段*: `{key, name, type, current_exp, current_level}`
 *   **`plot`**: 剧情或任务。
-    *   *必须字段*: `{key, name, type, required, value}`
+    *   *推荐字段*: `{key, name, type, required, value}`
 *   **`combat`**: 特殊统计类型,如战斗力、角色实力。
-    *   *必须字段*: `{key, name, type, value}`
+    *   *推荐字段*: `{key, name, type, value}`
+
+</del>
 
 ---
 
 ### **核心状态路径 (Core State Paths)**
 
-以下是 `state` 对象内的标准数据访问路径。
+以下是基于 SAMU 的 `state` 对象内标准数据访问路径约定（注意！未来不排除硬编码！）。
 
 *   **顶级路径**:
     *   `character`: 包含所有角色对象的容器。
@@ -67,7 +70,6 @@ SAMU 的诞生并非为了改进或增强原版 SAM ，~~因为我非常的菜~~
     *   `character.[char_key].inventory`: 存放角色的物品库存列表。
     *   `character.[char_key].combat`: 存放角色的战斗力相关数值。
 
-</del>
 
 ## ⌨️ 指令参考 (Command Reference)
 
@@ -75,10 +77,10 @@ SAMU 的诞生并非为了改进或增强原版 SAM ，~~因为我非常的菜~~
 | ------------------ | ----------------------------------------------------------------- | ------------------------------------------ |
 | **SET**            | `<SET :: path :: new_value>`                                      | 修改一个已存在的数据值。                   |
 | **ADD**            | `<ADD :: path :: value_or_object>`                                | 变更数值，或向列表中添加一个新项目。       |
-| **REMOVE**         | `<REMOVE :: path :: key :: key_to_match :: count>`                | 根据内容的key从列表中移除一个或多个项目。  |
-| **DEL**            | `<DEL :: path :: index_number>`                                   | 根据位置索引从列表中移除一个项目。         |
+| **REMOVE**         | `<REMOVE :: list_path :: identifier :: target_id :: count>`       | 根据内容的标识从列表中移除一个或多个项目。 |
+| **DEL**            | `<DEL :: list_path :: index_number>`                              | 根据位置索引从列表中移除一个项目。         |
 | **TIMED_SET**      | `<TIMED_SET :: path :: value :: reason :: is_real_time? :: time>` | 安排一个未来的状态变更。                   |
-| **CANCEL_SET**     | `<CANCEL_SET :: reason>`                                          | 取消一个已安排的`TIMED_SET`。                |
+| **CANCEL_SET**     | `<CANCEL_SET :: identifier>`                                      | 取消一个已安排的`TIMED_SET`。                |
 | **RESPONSE_SUMMARY** | `<RESPONSE_SUMMARY :: text>`                                    | 记录本次回应的关键事件摘要。               |
 | **EVAL**           | `<EVAL :: func_name :: params...>`                                | **(高风险)** 执行一个预定义的JS函数。      |
 
@@ -92,18 +94,20 @@ SAMU 的诞生并非为了改进或增强原版 SAM ，~~因为我非常的菜~~
 
 #### 指令: SET
 - **概述**: 修改一个`已存在`的数据值。
-- **核心用途**: 改变角色属性、世界状态等已经存在的值。
+- **核心用途**: 改变角色属性、世界状态等已经存在的值。它执行的是`覆盖`操作。
 - **绝对禁止**: 禁止使用`SET`向列表中添加新的对象。这是`ADD`的职责。
 - **语法**: `<SET :: path :: new_value>`
 - **示例**:
   - 更新玩家力量: `<SET :: character.player.attr.strength.value :: 15>`
   - 更改天气状况: `<SET :: world.environment.weather :: "暴雨">`
   - 标记任务完成: `<SET :: plot.main_quest_01.value :: "completed">`
+- **注解**：
+  - 区分了与 `ADD` 的逻辑，`SET` 只能被允许修改`已存在`的数据。
 
 #### 指令: ADD
 - **概述**: `变更数值`,或向列表中`添加一个全新的项目`。
 - **核心用途**: 变更数值、创造一个全新的物品、赋予角色一个新状态或技能等。
-- **数据完整性**: 添加新项目时,必须提供一个`完整的对象`。
+- **数据完整性**: 添加新项目时,必须提供一个`完整的对象`（参考`数据类型定义 (Type Definitions)`）。
 - **自动堆叠**: 如果向一个列表中添加一个带`"key"`和`"count"`属性的对象,且列表中已存在相同`key`的对象,脚本会自动将它们的`count`相加,而不是添加一个重复的新对象。
 - **语法**:
   - 变更数值: `<ADD :: path :: value_to_add>`
@@ -112,25 +116,36 @@ SAMU 的诞生并非为了改进或增强原版 SAM ，~~因为我非常的菜~~
   - 增加力量经验值: `<ADD :: character.player.attr.strength.current_exp :: 10>`
   - 添加"中毒"状态: `<ADD :: character.player.splst :: {"key": "status_poisoned", "name": "中毒", "type": "state", "value": "持续伤害"}>`
   - 添加一把剑: `<ADD :: character.player.inventory :: {"key": "sword_common", "name": "普通的剑", "type": "item", "desc": "一把标准的单手剑。", "count": 1}>`
+- **注解**：
+  - `ADD` 只管添加，根据我们的`数据类型定义`去进行`数值变更`或者将一个`完整对象`（预设及新创造的）添加进路径中，`完整的对象`是后续 AI 根据 `KEY` 执行任何指令或者供 `UI` 调用的基石。
 
 #### 指令: REMOVE
-- **概述**: 根据项目的`content identifier(key)`来移除列表中的项目。
+- **概述**: 根据项目的`content identifier`来移除列表中的项目。
 - **核心用途**: 当你需要消耗、丢弃或移除一个`内容已知`的物品或状态时使用。将`count`设为`0`为移除所有匹配项。
 - **智能数量处理**: 如果匹配到的项目拥有`"count"`属性,此指令会优先减少其数量,而不是直接移除整个对象。只有当`count`减至`0`或更少时,对象才会被彻底移除。
-- **语法**: `<REMOVE :: path :: key :: key_to_match :: count>`
+- **语法**: `<REMOVE :: list_path :: identifier :: target_id :: count>`
+  - `list_path`: 目标列表的路径, 如 `character.player.inventory`。
+  - `identifier`: 用于匹配的`键`名, 通常是 `key`。
+  - `target_id`: 要匹配的`值`, 如 `"potion_health_small"`。
+  - `count`: 移除的数量。
 - **示例**:
   - 消耗`1`个药水: `<REMOVE :: character.player.inventory :: key :: "potion_health_small" :: 1>`
   - 丢弃`2`把匕首: `<REMOVE :: character.player.inventory :: key :: "dagger_iron" :: 2>`
   - "中毒"状态消失 (移除所有): `<REMOVE :: character.player.splst :: key :: "status_poisoned" :: 0>`
+- **注解**：
+  - 为什么这么改，首先是杜绝 `幽灵对象`，还有提升精度，所有的对象都将以 `唯一KEY` 的形式存在与变量管理器中，能精确就绝对不要让 **智力随缘的 AI** 去靠脑子使用 `DEL`。
 
 #### 指令: DEL
 - **概述**: 根据项目在列表中的`positional index`来移除项目。
 - **核心用途**: 当你需要移除列表中`第几个`项目时使用。这是一个备用选项，**强烈建议优先使用 `REMOVE`**。
-- **语法**: `<DEL :: path :: index_number>`
+- **语法**: `<DEL :: list_path :: index_number>`
 - **注意**: 位置编号从`0`开始 (0是第1个, 1是第2个)。
 - **示例**:
   - 移除背包中的第`1`个物品: `<DEL :: character.player.inventory :: 0>`
   - 移除状态列表中的第`3`个状态: `<DEL :: character.player.splst :: 2>`
+- **注解**：
+  - emmmm.... `DEL` 有它存在的意义。
+
 
 ---
 
@@ -148,19 +163,27 @@ SAMU 的诞生并非为了改进或增强原版 SAM ，~~因为我非常的菜~~
   - **模式一: 修改值**: 当 `path` 指向具体属性时, `new_value` 是目标值。
     - *示例 (回合)*: 3回合后, 玩家力量(`strength`)的当前值(`value`)变为12。
       `<TIMED_SET :: character.player.attr.strength.value :: 12 :: "player_power_fades" :: false :: 3>`
-  - **模式二: 移除对象**: 当 `path` 指向一个完整的对象时, `new_value` 必须是 `null` 。
-    - *示例 (回合)*: 3回合后, "力量祝福" 效果(`buff_strength`)被移除。
+  - **模式二: 移除对象 (智能)**: 当你需要定时移除列表中的一个对象时, `path` 应指向那个**完整的对象**，并将 `new_value` 设置为 `null`。脚本会自动将其转换为一个`REMOVE`指令。
+    - *示例 (回合)*: 3回合后, "力量祝福" 效果(`buff_strength`)被移除。这里的 `path` 指向的是`buff_strength`对象本身，而不是包含它的`splst`列表。
       `<TIMED_SET :: character.player.splst.buff_strength :: null :: "player_strength_buff" :: false :: 3>`
+- **注解**：
+  - 看说明是有点复杂了，完了会预置到提示词里....嗯...
+
 
 #### 指令: CANCEL_SET
 - **概述**: 取消一个已安排的`TIMED_SET`。
-- **核心用途**: 可通过`TIMED_SET`指令中设置的唯一`reason`来精确匹配并取消。
-- **语法**: `<CANCEL_SET :: reason>`
-- **示例**: `<CANCEL_SET :: "player_strength_buff">`
+- **核心用途**: 可通过`TIMED_SET`指令中设置的唯一`reason`或其`path`来精确匹配并取消。
+- **语法**: `<CANCEL_SET :: identifier>`
+  - `identifier` 可以是 `reason` 字符串或 `path` 字符串。
+- **示例**:
+  - `<CANCEL_SET :: "player_strength_buff">`
+  - `<CANCEL_SET :: "character.player.splst.buff_strength">`
+- **注解**：
+  - 预置提示词中仅允许使用 `reason` ，即 `唯一标识符`。
 
 ---
 
-### **摘要指令**
+### **摘要与代码执行指令**
 
 #### 指令: RESPONSE_SUMMARY
 - **概述**: 记录本次回应中发生的最重要的事件，用于上下文记忆。
@@ -169,13 +192,15 @@ SAMU 的诞生并非为了改进或增强原版 SAM ，~~因为我非常的菜~~
 
 #### 指令: EVAL
 - **概述**: 执行一个预定义在`state.func`中的沙盒化JavaScript函数。
-- **⚠️ 安全警告**: 此命令具有高风险性，它允许AI在您的浏览器环境中执行代码。除非您完全理解其工作原理和潜在风险，否则**绝对不要使用**。不当使用可能导致数据损坏或安全漏洞。
+- **语法**: `<EVAL :: func_name :: param1 :: param2...>`
+
+**⚠️ 安全警告**: 此命令具有高风险性，它允许AI在您的浏览器环境中执行代码。除非您完全理解其工作原理和潜在风险，否则**绝对不要使用**。**对于因使用此功能造成的任何问题，脚本作者概不负责。**
+
 
 ## 🛠️ SAMU通用角色卡与开局场景/变量/UI自动生成提示词
 
-*(此部分内容正在编写中，请等待哔哩哔哩的介绍视频。)*
+*(此部分内容正在编写中，请等待哔哩哔-哔哩-的介绍视频。)*
 
 ## 🧾 许可证 (License)
 
 本项目沿用原项目的许可证。详情请参阅 `LICENSE` 文件。
-
