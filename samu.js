@@ -1,7 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager Unofficial
-// == Version: 0.0.3 beta
-// ==
+// == Version: 0.4 beta
 // == Current Maintainer: LynxShu (Github.com/LynxShu/ST_var_manager)
 // == This project is a fork work of SAM (Github.com/DefinitelyNotProcrastinating/ST_var_manager) 
 // == This script provides a robust state management system for SillyTavern.
@@ -173,8 +172,25 @@
             let [path, valueStr] = params;
             if (!path || valueStr === undefined) return;
             
-            const target = _.get(state.static, path);
+            let target = _.get(state.static, path);
             const valueToAdd = tryParseJSON(valueStr);
+
+            // Handle Numeric Addition first as it has a specific case for undefined target
+            const increment = Number(valueStr);
+            if (!isNaN(increment)) {
+                if (typeof target === 'number' || target === undefined) {
+                    const baseValue = Number(target) || 0;
+                    _.set(state.static, path, baseValue + increment);
+                    return;
+                }
+            }
+            
+            // If target is undefined and it's not a numeric addition, create an array.
+            if (target === undefined) {
+                _.set(state.static, path, [valueToAdd]);
+                context.modifiedListPaths.add(path); // Mark for post-processing
+                return;
+            }
 
             if (Array.isArray(target)) {
                 context.modifiedListPaths.add(path);
@@ -203,17 +219,7 @@
                 return;
             }
 
-            // Handle Numeric Addition
-            const increment = Number(valueStr);
-            if (!isNaN(increment)) {
-                if (typeof target === 'number' || target === undefined) {
-                    const baseValue = Number(target) || 0;
-                    _.set(state.static, path, baseValue + increment);
-                    return;
-                }
-            }
-
-            console.warn(`[${SCRIPT_NAME}] ADD command aborted: Target at "${path}" is not an Array or a Number. Its type is "${typeof target}". Received value:`, valueToAdd);
+            console.warn(`[${SCRIPT_NAME}] ADD command aborted: Target at "${path}" is not an Array. Its type is "${typeof target}". Received value:`, valueToAdd);
         },
         'RESPONSE_SUMMARY': (params, state) => {
             if (!Array.isArray(state.responseSummary)) {
@@ -228,6 +234,20 @@
             const [varName, varValue, reason, isGameTimeStr, timeUnitsStr] = params;
             if (!varName || varValue === undefined || !reason || !isGameTimeStr || !timeUnitsStr) return;
             const isGameTime = isGameTimeStr.toLowerCase() === 'true' || isGameTimeStr === '1';
+
+            // Parameter validation
+            if (isGameTime) {
+                if (isNaN(new Date(timeUnitsStr).getTime())) {
+                    if (DEBUG) console.warn(`[${SCRIPT_NAME}] TIMED_SET aborted: Invalid date string for game time: "${timeUnitsStr}"`);
+                    return;
+                }
+            } else {
+                const roundCount = Number(timeUnitsStr);
+                if (!Number.isInteger(roundCount) || roundCount < 0) {
+                    if (DEBUG) console.warn(`[${SCRIPT_NAME}] TIMED_SET aborted: Round count must be a non-negative integer. Received: "${timeUnitsStr}"`);
+                    return;
+                }
+            }
 
             // Correctly parse the value, preserving `null` for object removal signals.
             let finalValue;
@@ -305,14 +325,25 @@
         },
         'DEL': (params, state, isPreparsed, context) => {
             const [listPath, indexStr] = params;
-            if (!listPath || indexStr === undefined) return;
+            if (!listPath || indexStr === undefined) {
+                if (DEBUG) console.warn(`[${SCRIPT_NAME}] DEL: Missing required parameters.`, params);
+                return;
+            }
             const index = parseInt(indexStr, 10);
-            if (isNaN(index)) return;
+            if (isNaN(index)) {
+                if (DEBUG) console.warn(`[${SCRIPT_NAME}] DEL: Index is not a number. Received: "${indexStr}"`);
+                return;
+            }
             const list = _.get(state.static, listPath);
-            if (!Array.isArray(list)) return;
+            if (!Array.isArray(list)) {
+                if (DEBUG) console.warn(`[${SCRIPT_NAME}] DEL: Path "${listPath}" is not an array.`);
+                return;
+            }
             if (index >= 0 && index < list.length) {
                 list[index] = undefined;
                 context.modifiedListPaths.add(listPath);
+            } else {
+                 if (DEBUG) console.warn(`[${SCRIPT_NAME}] DEL: Index ${index} is out of bounds for list at "${listPath}" (length ${list.length}).`);
             }
         },
         'EVAL': async (params, state) => {
@@ -542,6 +573,10 @@
         eventRemoveListener(tavern_events.MESSAGE_DELETED, oldHandlers.handleMessageDeleted);
         eventRemoveListener(tavern_events.MESSAGE_EDITED, oldHandlers.handleMessageEdited);
         eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleChatChanged);
+        // Also try to remove the new handler in case of a hot-reload of a script that already has it.
+        if (oldHandlers.handleCleanup) {
+            eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleCleanup);
+        }
         eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
         eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
         delete window[HANDLER_STORAGE_KEY];
@@ -554,7 +589,49 @@
         handleMessageEdited: async () => unifiedEventHandler(tavern_events.MESSAGE_EDITED),
         handleChatChanged: async () => unifiedEventHandler(tavern_events.CHAT_CHANGED),
         handleMessageSent: async () => unifiedEventHandler(tavern_events.MESSAGE_SENT),
-        handleGenerationStopped: async () => unifiedEventHandler(tavern_events.GENERATION_STOPPED)
+        handleGenerationStopped: async () => unifiedEventHandler(tavern_events.GENERATION_STOPPED),
+
+        handleCleanup: async () => {
+            if (DEBUG) console.log(`[${SCRIPT_NAME}] [Cleanup] Checking if current card is a SAMU card.`);
+            let char_lorebook;
+            try {
+                char_lorebook = await getCharLorebooks();
+            } catch (error) {
+                console.error(`[${SCRIPT_NAME}] [Cleanup] Failed to get character lorebooks.`, error);
+                return;
+            }
+            if (!char_lorebook || !char_lorebook.primary) {
+                return;
+            }
+    
+            let entries;
+            try {
+                entries = await getLorebookEntries(char_lorebook.primary);
+            } catch (error) {
+                console.error(`[${SCRIPT_NAME}] [Cleanup] Failed to get lorebook entries.`, error);
+                return;
+            }
+            if (!entries) return;
+    
+            const found_ID = entries.some(entry => 
+                entry.comment && entry.comment.trim().toLowerCase() === "SAMU_IDENTIFIER".toLowerCase()
+            );
+    
+            if (found_ID) {
+                if (DEBUG) console.log(`[${SCRIPT_NAME}] [Cleanup] Identified SAMU card. Listeners will be kept.`);
+            } else {
+                console.log(`[${SCRIPT_NAME}] [Cleanup] Identified a NON-SAMU card. Cleaning up all SAMU listeners.`);
+                eventRemoveListener(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
+                eventRemoveListener(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
+                eventRemoveListener(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
+                eventRemoveListener(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
+                eventRemoveListener(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
+                eventRemoveListener(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
+                eventRemoveListener(tavern_events.MESSAGE_SENT, handlers.handleMessageSent);
+                eventRemoveListener(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
+                eventRemoveListener(tavern_events.CHAT_CHANGED, handlers.handleCleanup); // Also remove self
+            }
+        }
     };
     $(() => {
         cleanupPreviousInstance();
@@ -570,12 +647,12 @@
         eventOn(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
         eventOn(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
         eventOn(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
-        eventOn(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
+        eventOn(tavern_events.CHAT_CHANGED, handlers.handleCleanup); // Use the new cleanup handler
         eventOn(tavern_events.MESSAGE_SENT, handlers.handleMessageSent);
         eventOn(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
         window[HANDLER_STORAGE_KEY] = handlers;
         try {
-            console.log(`[${SCRIPT_NAME}] Version 0.0.2 (Merged FSM) loaded.`);
+            console.log(`[${SCRIPT_NAME}] SAMU loaded.`);
             initializeOrReloadStateForCurrentChat();
         } catch (error) {
             console.error(`[${SCRIPT_NAME}] Error during final initialization:`, error);
