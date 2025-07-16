@@ -1,8 +1,8 @@
 // ============================================================================
 // == Situational Awareness Manager Unofficial
-// == Version: 0.4 beta
+// == Version: 0.5 beta
 // == Current Maintainer: LynxShu (Github.com/LynxShu/ST_var_manager)
-// == This project is a fork work of SAM (Github.com/DefinitelyNotProcrastinating/ST_var_manager) 
+// == Original SAM (Github.com/DefinitelyNotProcrastinating/ST_var_manager) 
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
 // == functions, ensuring proper variable display and structure.
@@ -26,6 +26,43 @@
     const event_queue = [];
     let isDispatching = false;
     let isProcessingState = false;
+
+    // --- Generation Watcher ---
+    let generationWatcherId = null;
+    const WATCHER_INTERVAL_MS = 3000; // Check every 3 seconds
+    const FORCE_PROCESS_COMPLETION = "FORCE_PROCESS_COMPLETION";
+
+    function stopGenerationWatcher() {
+        if (generationWatcherId) {
+            if (DEBUG) console.log(`[${SCRIPT_NAME}] [Watcher] Stopping generation watcher.`);
+            clearInterval(generationWatcherId);
+            generationWatcherId = null;
+        }
+    }
+
+    function startGenerationWatcher() {
+        stopGenerationWatcher(); // Stop any previous watcher just in case.
+        if (DEBUG) console.log(`[${SCRIPT_NAME}] [Watcher] Starting generation watcher. Check interval: ${WATCHER_INTERVAL_MS / 1000}s.`);
+        generationWatcherId = setInterval(() => {
+            if (DEBUG) console.log(`[${SCRIPT_NAME}] [Watcher] Performing check...`);
+            
+            // This is the core logic: Check if the "Stop" button is visible.
+            const isUiGenerating = $('#mes_stop').is(':visible');
+
+            // Condition for intervention: FSM is stuck waiting, but the UI says generation is over.
+            if (curr_state === STATES.AWAIT_GENERATION && !isUiGenerating) {
+                console.warn(`[${SCRIPT_NAME}] [Watcher] DETECTED DESYNC! FSM is in AWAIT_GENERATION, but ST is not generating. Forcing state transition.`);
+                stopGenerationWatcher(); // Stop ourselves from running again.
+                unifiedEventHandler(FORCE_PROCESS_COMPLETION); // Force the FSM to proceed.
+            } else if (curr_state !== STATES.AWAIT_GENERATION) {
+                // Failsafe: If the FSM is not in the await state, the watcher's job is done.
+                if (DEBUG) console.log(`[${SCRIPT_NAME}] [Watcher] FSM is no longer awaiting generation. Shutting down watcher.`);
+                stopGenerationWatcher();
+            }
+        }, WATCHER_INTERVAL_MS);
+    }
+    // --------------------------
+
     async function getRoundCounter() { return SillyTavern.chat.length - 1; }
     function tryParseJSON(str) { try { return JSON.parse(str); } catch (e) { return str; } }
     function goodCopy(state) { return _.cloneDeep(state) ?? _.cloneDeep(INITIAL_STATE); }
@@ -195,12 +232,12 @@
             if (Array.isArray(target)) {
                 context.modifiedListPaths.add(path);
                 
-                if (typeof valueToAdd === 'object' && valueToAdd !== null && 'key' in valueToAdd && typeof valueToAdd.count === 'number') {
+                if (typeof valueToAdd === 'object' && valueToAdd !== null && 'key' in valueToAdd && typeof valueToAdd.value === 'number') {
                     const itemsToMerge = _.filter(target, item => 
-                        typeof item === 'object' && item !== null && item.key === valueToAdd.key && typeof item.count === 'number'
+                        typeof item === 'object' && item !== null && item.key === valueToAdd.key && typeof item.value === 'number'
                     );
                     
-                    const totalCount = valueToAdd.count + _.sumBy(itemsToMerge, 'count');
+                    const totalCount = valueToAdd.value + _.sumBy(itemsToMerge, 'value');
                     
                     if (itemsToMerge.length > 0) {
                         _.remove(target, item => typeof item === 'object' && item !== null && item.key === valueToAdd.key);
@@ -209,7 +246,7 @@
                     // Use a template from the item being added or an existing item to preserve other properties
                     const template = itemsToMerge.length > 0 ? itemsToMerge[0] : valueToAdd;
                     const mergedItem = _.cloneDeep(template);
-                    mergedItem.count = totalCount;
+                    mergedItem.value = totalCount;
                     
                     target.push(mergedItem);
 
@@ -301,17 +338,21 @@
                 if (totalRemoved >= toRemove) return false;
 
                 if (_.get(item, identifier) === parsedTargetId) {
-                    if (typeof item === 'object' && item !== null && 'count' in item && typeof item.count === 'number') {
-                        const canRemoveFromThisStack = toRemove - totalRemoved;
-                        if (item.count > canRemoveFromThisStack) {
-                            item.count -= canRemoveFromThisStack;
-                            totalRemoved = toRemove;
-                            return false;
-                        } else {
-                            totalRemoved += item.count;
+                    // Logic for stackable items (e.g., {key: 'apple', value: 5})
+                    if (typeof item === 'object' && item !== null && 'value' in item && typeof item.value === 'number') {
+                        const amountToRemoveFromThisStack = Math.min(item.value, toRemove - totalRemoved);
+                        item.value -= amountToRemoveFromThisStack;
+                        totalRemoved += amountToRemoveFromThisStack;
+                        
+                        // If the stack is depleted, return true to have _.remove delete it.
+                        if (item.value <= 0) {
                             return true;
                         }
+                        // Otherwise, keep the item with its reduced value.
+                        return false;
+
                     } else {
+                        // This is a non-stackable item. Remove it.
                         totalRemoved++;
                         return true;
                     }
@@ -373,12 +414,12 @@
                 _.remove(list, (item) => item === undefined);
 
                 // Step 2: Merge stackable items.
-                // An item is considered stackable if it's an object with a 'key' and a numeric 'count'.
+                // An item is considered stackable if it's an object with a 'key' and a numeric 'value'.
                 const stackableItems = list.filter(item => 
-                    typeof item === 'object' && item !== null && item.key !== undefined && typeof item.count === 'number'
+                    typeof item === 'object' && item !== null && item.key !== undefined && typeof item.value === 'number'
                 );
                 const nonStackableItems = list.filter(item => 
-                    !(typeof item === 'object' && item !== null && item.key !== undefined && typeof item.count === 'number')
+                    !(typeof item === 'object' && item !== null && item.key !== undefined && typeof item.value === 'number')
                 );
 
                 if (stackableItems.length > 0) {
@@ -387,10 +428,10 @@
                         if (group.length === 1) {
                             return group[0];
                         }
-                        const totalCount = _.sumBy(group, 'count');
+                        const totalCount = _.sumBy(group, 'value');
                         // Use the first item as a template for the merged item.
                         const mergedItem = _.cloneDeep(group[0]);
-                        mergedItem.count = totalCount;
+                        mergedItem.value = totalCount;
                         return mergedItem;
                     });
                     
@@ -472,6 +513,9 @@
         } else {
             await insertOrAssignVariables({"SAM_data": _.cloneDeep(INITIAL_STATE)});
         }
+        // Notify external modules that the state is ready for interaction.
+        if (DEBUG) console.log(`[${SCRIPT_NAME}] Dispatching 'samu-state-ready' event.`);
+        document.dispatchEvent(new CustomEvent('samu-state-ready'));
     }
     async function dispatcher(event, ...event_params){
         if (DEBUG) console.log(`[${SCRIPT_NAME}] [FSM Dispatcher] Event: ${event}, State: ${curr_state}`);
@@ -480,20 +524,22 @@
                 case STATES.IDLE: {
                     switch (event) {
                         case tavern_events.GENERATION_STARTED: {
-                            if (event_params[2]) {
+                            if (event_params[2]) { // dry run
                                 if (DEBUG) console.log(`[${SCRIPT_NAME}] [IDLE] Dry run detected, aborting.`);
                                 return;
                             }
                             if (event_params[0] === "swipe" ){
-                                if (DEBUG) console.log("[SAMU] [IDLE handler] Swipe generate to GENERATE during IDLE detected. Loading from before latest user msg.");
+                                if (DEBUG) console.log(`[${SCRIPT_NAME}] [IDLE] Swipe-generation detected. Loading state from before latest user message.`);
                                 const latestUserMsg = await findLatestUserMsgIndex();
                                 await loadStateFromMessage(latestUserMsg);
                             }
                             curr_state = STATES.AWAIT_GENERATION;
+                            startGenerationWatcher(); // Start watcher
                             break;
                         }
                         case tavern_events.MESSAGE_SENT: {
                             curr_state = STATES.AWAIT_GENERATION;
+                            // Watcher will be started by the GENERATION_STARTED event that follows.
                             break;
                         }
                         case tavern_events.MESSAGE_SWIPED:
@@ -509,19 +555,23 @@
                 }
                 case STATES.AWAIT_GENERATION: {
                     switch (event){
+                        case FORCE_PROCESS_COMPLETION: // Watcher-triggered
                         case tavern_events.GENERATION_STOPPED:
                         case tavern_events.GENERATION_ENDED: {
+                            stopGenerationWatcher(); // Stop watcher
                             curr_state = STATES.PROCESSING;
-                            if (DEBUG) console.log(`[${SCRIPT_NAME}] [AWAIT_GENERATION] Generation ended. Processing message.`);
-                            await new Promise(resolve => setTimeout(resolve, 500));
+                            if (DEBUG) console.log(`[${SCRIPT_NAME}] [AWAIT_GENERATION] Generation ended or forced. Processing message.`);
+                            
                             const index = SillyTavern.chat.length - 1;
                             await processMessageState(index);
+
                             if (DEBUG) console.log(`[${SCRIPT_NAME}] [AWAIT_GENERATION] Processing complete. Returning to IDLE.`);
                             curr_state = STATES.IDLE;
                             break;
                         }
                         case tavern_events.CHAT_CHANGED: {
-                            console.log(`[${SCRIPT_NAME}] [AWAIT_GENERATION] Chat changed during generation. Aborting and returning to IDLE.`);
+                            stopGenerationWatcher(); // Stop watcher
+                            console.warn(`[${SCRIPT_NAME}] [AWAIT_GENERATION] Chat changed during generation. Aborting and returning to IDLE.`);
                             await sync_latest_state();
                             curr_state = STATES.IDLE;
                             break;
@@ -536,6 +586,7 @@
             }
         } catch(e) {
             console.error(`[${SCRIPT_NAME}] [Dispatcher] FSM Scheduling failed. Error: ${e}`);
+            stopGenerationWatcher(); // Failsafe stop
             curr_state = STATES.IDLE;
         }
     }
@@ -572,13 +623,17 @@
         eventRemoveListener(tavern_events.MESSAGE_SWIPED, oldHandlers.handleMessageSwiped);
         eventRemoveListener(tavern_events.MESSAGE_DELETED, oldHandlers.handleMessageDeleted);
         eventRemoveListener(tavern_events.MESSAGE_EDITED, oldHandlers.handleMessageEdited);
-        eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleChatChanged);
-        // Also try to remove the new handler in case of a hot-reload of a script that already has it.
+        eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
+        eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
+
+        // Correctly remove both handlers for CHAT_CHANGED from the previous instance
+        if (oldHandlers.handleChatChanged) {
+            eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleChatChanged);
+        }
         if (oldHandlers.handleCleanup) {
             eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleCleanup);
         }
-        eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
-        eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
+        
         delete window[HANDLER_STORAGE_KEY];
     };
     const handlers = {
@@ -626,10 +681,12 @@
                 eventRemoveListener(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
                 eventRemoveListener(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
                 eventRemoveListener(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
-                eventRemoveListener(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
                 eventRemoveListener(tavern_events.MESSAGE_SENT, handlers.handleMessageSent);
                 eventRemoveListener(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
-                eventRemoveListener(tavern_events.CHAT_CHANGED, handlers.handleCleanup); // Also remove self
+
+                // Correctly remove both handlers for CHAT_CHANGED, including self
+                eventRemoveListener(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
+                eventRemoveListener(tavern_events.CHAT_CHANGED, handlers.handleCleanup);
             }
         }
     };
@@ -647,7 +704,8 @@
         eventOn(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
         eventOn(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
         eventOn(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
-        eventOn(tavern_events.CHAT_CHANGED, handlers.handleCleanup); // Use the new cleanup handler
+        eventOn(tavern_events.CHAT_CHANGED, handlers.handleChatChanged); // Notify FSM of chat changes
+        eventOn(tavern_events.CHAT_CHANGED, handlers.handleCleanup);   // Check if cleanup is needed
         eventOn(tavern_events.MESSAGE_SENT, handlers.handleMessageSent);
         eventOn(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
         window[HANDLER_STORAGE_KEY] = handlers;
@@ -658,4 +716,79 @@
             console.error(`[${SCRIPT_NAME}] Error during final initialization:`, error);
         }
     });
+})();
+
+// ============================================================================
+// == SAMU External Logic Library Loader
+// ============================================================================
+(function() {
+    const SCRIPT_NAME = "SAMU Logic Loader";
+    const DEBUG = false; // This can be changed independently for debugging the loader
+
+    /**
+     * Merges functions found in the global library into the SAMU state object.
+     * @param {object} state - The SAMU state object.
+     */
+    function mergeLibraryFunctions(state) {
+        if (typeof window.SAMU_Logic_Library !== 'object' || window.SAMU_Logic_Library === null) {
+            return; // Library not found, exit silently.
+        }
+
+        if (DEBUG) console.log(`[${SCRIPT_NAME}] Merging functions from external library...`);
+        if (!Array.isArray(state.func)) {
+            state.func = [];
+        }
+
+        for (const funcName in window.SAMU_Logic_Library) {
+            if (Object.prototype.hasOwnProperty.call(window.SAMU_Logic_Library, funcName)) {
+                const isAlreadyDefined = state.func.some(f => f.func_name === funcName);
+                
+                // Only add the function if it's not already defined in the state (card/save takes priority).
+                if (!isAlreadyDefined) {
+                    const funcBody = window.SAMU_Logic_Library[funcName].toString();
+                    state.func.push({
+                        func_name: funcName,
+                        func_params: ['state', 'params'], // Standard signature for library functions
+                        func_body: `return (${funcBody})(state, params);`, // Wrap to execute and allow return values
+                        timeout: 5000,       // Default timeout
+                        network_access: false // Default to no network access
+                    });
+                    if (DEBUG) console.log(`[${SCRIPT_NAME}] > Loaded function: ${funcName}`);
+                } else {
+                    if (DEBUG) console.log(`[${SCRIPT_NAME}] > Function '${funcName}' is already defined in state. Skipping.`);
+                }
+            }
+        }
+    }
+
+    /**
+     * Event handler triggered when the main SAMU script signals that the state is ready.
+     */
+    async function onStateReady() {
+        if (DEBUG) console.log(`[${SCRIPT_NAME}] Received 'samu-state-ready' signal.`);
+        try {
+            const variables = await getVariables();
+            if (variables && variables.SAM_data) {
+                const currentState = variables.SAM_data;
+                mergeLibraryFunctions(currentState);
+                // Save the modified state back. Note: Using goodCopy to avoid circular reference issues.
+                await insertOrAssignVariables({ "SAM_data": _.cloneDeep(currentState) });
+                if (DEBUG) console.log(`[${SCRIPT_NAME}] Library functions merged and state saved.`);
+            }
+        } catch (error) {
+            console.error(`[${SCRIPT_NAME}] Error merging library functions:`, error);
+        }
+    }
+
+    // Listen for the custom event dispatched by the main SAMU script.
+    document.addEventListener('samu-state-ready', onStateReady);
+    
+    // Use a small delay on startup to ensure the main script has had time to register its cleanup handlers.
+    // This also helps in cases of rapid reloads.
+    setTimeout(() => {
+        if (window.SAMU_Logic_Library) {
+            console.log(`[${SCRIPT_NAME}] Initialized and waiting for SAMU state.`);
+        }
+    }, 500);
+
 })();
