@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager Unofficial
-// == Version: 0.5 beta
+// == Version: 0.0.5 beta
 // == Current Maintainer: LynxShu (Github.com/LynxShu/ST_var_manager)
 // == Original SAM (Github.com/DefinitelyNotProcrastinating/ST_var_manager) 
 // == This script provides a robust state management system for SillyTavern.
@@ -163,8 +163,10 @@
         try {
             const result = await Promise.race([executionPromise, timeoutPromise]);
             if (DEBUG) console.log(`[${SCRIPT_NAME}] EVAL: Function '${funcName}' executed successfully.`, { result });
+            return result; // Return the result from the sandboxed function
         } catch (error) {
             console.error(`[${SCRIPT_NAME}] EVAL: Error executing function '${funcName}'.`, error);
+            return null; // Return null on error
         }
     }
     async function processVolatileUpdates(state) {
@@ -389,19 +391,30 @@
         },
         'EVAL': async (params, state) => {
             const [funcName, ...funcParams] = params;
-            if (!funcName) return;
-            await runSandboxedFunction(funcName, funcParams, state);
+            if (!funcName) return null;
+            // The function might return a list of new commands to be executed.
+            const newCommands = await runSandboxedFunction(funcName, funcParams, state);
+            return newCommands;
         }
     };
     async function applyCommandsToState(commands, state) {
         const context = { modifiedListPaths: new Set() };
-        for (const command of commands) {
+        // Use a standard for-loop to allow modification of the commands array during iteration.
+        // This allows handlers (like EVAL) to queue up new commands.
+        for (let i = 0; i < commands.length; i++) {
+            const command = commands[i];
             try {
                 const handler = commandHandlers[command.type];
                 if (handler) {
                     const params = command.preparsed ? command.params : command.params.split('::').map(p => p.trim());
                     const isPreparsed = command.preparsed || false;
-                    await handler(params, state, isPreparsed, context);
+                    const newCommands = await handler(params, state, isPreparsed, context);
+
+                    // If the handler returned a list of new commands, add them to the queue.
+                    if (Array.isArray(newCommands) && newCommands.length > 0) {
+                        commands.push(...newCommands);
+                        if (DEBUG) console.log(`[${SCRIPT_NAME}] Queued ${newCommands.length} new command(s) from a ${command.type} operation.`);
+                    }
                 }
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Error processing command: ${JSON.stringify(command)}`, error);
